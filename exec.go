@@ -63,8 +63,9 @@ func guestCommand(m *Meta, o ExecOpts) (path string, args, env []string) {
 	return "/bin/sh", args, env
 }
 
-// psScript wraps a Windows command so errors print as plain text and the
-// exit code of the last native program (or 1 on a PowerShell error) comes back.
+// psScript wraps a Windows command so errors print as plain text and, like
+// bash, the last command decides the exit code: 0 if it succeeded, else the
+// native program's exit code, or 1 for a failed cmdlet.
 func psScript(m *Meta, o ExecOpts) string {
 	p := metaProfile(m)
 	cwd := o.Cwd
@@ -80,7 +81,7 @@ func psScript(m *Meta, o ExecOpts) string {
 	}
 	fmt.Fprintf(&s, "Set-Location -LiteralPath %s\n$global:LASTEXITCODE=$null\n", psQuote(cwd))
 	if o.Line != "" {
-		s.WriteString("& {\n" + o.Line + "\n}\n")
+		s.WriteString(o.Line + "\n")
 	} else {
 		s.WriteString("&")
 		for _, a := range o.Argv {
@@ -88,7 +89,7 @@ func psScript(m *Meta, o ExecOpts) string {
 		}
 		s.WriteString("\n")
 	}
-	s.WriteString("$veemsOK=$?\nif ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }\nif (-not $veemsOK) { exit 1 }\nexit 0\n")
+	s.WriteString("if ($?) { exit 0 }\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\nexit 1\n")
 	return s.String()
 }
 

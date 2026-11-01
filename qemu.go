@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const qemuBin = "qemu-system-x86_64"
@@ -187,6 +188,7 @@ func qemuImgCreate(path, backing string, sizeGB int) error {
 // command line names dir. Parent-death signals do not survive pasta and
 // bwrap's namespace setup, so cleanup never relies on them.
 func killVMProcs(dir string) {
+	var killed []string
 	ents, _ := os.ReadDir("/proc")
 	for _, e := range ents {
 		pid, err := strconv.Atoi(e.Name())
@@ -202,8 +204,25 @@ func killVMProcs(dir string) {
 		cl, _ := os.ReadFile("/proc/" + e.Name() + "/cmdline")
 		if strings.Contains(string(cl), dir+"/") {
 			syscall.Kill(pid, syscall.SIGKILL)
+			killed = append(killed, e.Name())
 		}
 	}
+	// wait (up to 5 s) until their memory is back, so a following `new` sees it
+	for _, pid := range killed {
+		for i := 0; i < 250 && running(pid); i++ {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+}
+
+// running reports whether a process exists and is not yet a zombie.
+func running(pid string) bool {
+	st, err := os.ReadFile("/proc/" + pid + "/stat")
+	if err != nil {
+		return false
+	}
+	_, after, _ := strings.Cut(string(st), ") ")
+	return !strings.HasPrefix(after, "Z")
 }
 
 // killOnSignal makes Ctrl-C or a kill of a foreground veems take its VM down too.
