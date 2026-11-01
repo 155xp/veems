@@ -123,11 +123,11 @@ func runToPoweroff(s Spec, limit time.Duration) error {
 }
 
 func build(o BuildOpts) error {
-	p, err := profile(o.OS)
+	p, err := profile(o.OS, o.Desktop)
 	if err != nil {
 		return err
 	}
-	dir := imageDir(p.OS)
+	dir := imageDir(p.Key)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -137,9 +137,9 @@ func build(o BuildOpts) error {
 	}
 	defer lock.Close()
 	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-		return fmt.Errorf("another `veems build %s` is running", p.OS)
+		return fmt.Errorf("another `veems build %s` is running", p.Key)
 	}
-	if !o.Snapshot || !exists(basePath(p.OS)) {
+	if !o.Snapshot || !exists(basePath(p.Key)) {
 		start := time.Now()
 		switch p.OS {
 		case "linux":
@@ -160,7 +160,7 @@ func buildLinux(p *Profile) error {
 	if err != nil {
 		return err
 	}
-	work := filepath.Join(imageDir(p.OS), "build")
+	work := filepath.Join(imageDir(p.Key), "build")
 	os.RemoveAll(work)
 	os.MkdirAll(work, 0o755)
 	disk := filepath.Join(work, "base.qcow2")
@@ -173,15 +173,19 @@ func buildLinux(p *Profile) error {
 	}
 	userData, _ := guestFiles.ReadFile("guest/linux-user-data.yaml")
 	seed := filepath.Join(work, "seed.iso")
-	if err := makeISO(seed, "CIDATA", map[string][]byte{
+	files := map[string][]byte{
 		"user-data": userData,
 		"meta-data": []byte("instance-id: veems-build\nlocal-hostname: veems\n"),
-	}); err != nil {
+	}
+	if p.Desktop {
+		files["desktop.sh"], _ = guestFiles.ReadFile("guest/linux-desktop.sh")
+	}
+	if err := makeISO(seed, "CIDATA", files); err != nil {
 		return err
 	}
 	logf("installing packages in a build VM (a few minutes)")
-	if err := runToPoweroff(Spec{OS: p.OS, Dir: work, Disk: disk, CPUs: 4, MemMB: 2048, Net: true,
-		CDROMs: []string{seed}, ROBinds: []string{cacheDir()}}, 20*time.Minute); err != nil {
+	if err := runToPoweroff(Spec{OS: p.OS, Desktop: p.Desktop, Dir: work, Disk: disk, CPUs: 4, MemMB: 2048, Net: true,
+		CDROMs: []string{seed}, ROBinds: []string{cacheDir()}}, 30*time.Minute); err != nil {
 		return err
 	}
 	return installBase(p, work, disk)
@@ -203,7 +207,7 @@ func buildWindows(p *Profile, o BuildOpts) error {
 	if err != nil {
 		return err
 	}
-	work := filepath.Join(imageDir(p.OS), "build")
+	work := filepath.Join(imageDir(p.Key), "build")
 	os.RemoveAll(work)
 	os.MkdirAll(work, 0o755)
 	disk := filepath.Join(work, "base.qcow2")
@@ -211,12 +215,18 @@ func buildWindows(p *Profile, o BuildOpts) error {
 		return err
 	}
 	index := "1" // Server Core
-	if o.Desktop {
-		index = "2"
+	if p.Desktop {
+		index = "2" // Desktop Experience
 	}
 	ua, _ := guestFiles.ReadFile("guest/autounattend.xml")
 	setup, _ := guestFiles.ReadFile("guest/veems-setup.ps1")
-	uaText := strings.NewReplacer("{{IMAGE_INDEX}}", index, "{{PASSWORD}}", windowsPassword).Replace(string(ua))
+	desktop := "$false"
+	if p.Desktop {
+		desktop = "$true"
+	}
+	fill := strings.NewReplacer("{{IMAGE_INDEX}}", index, "{{PASSWORD}}", windowsPassword, "{{DESKTOP}}", desktop)
+	uaText := fill.Replace(string(ua))
+	setup = []byte(fill.Replace(string(setup)))
 	unattend := filepath.Join(work, "unattend.iso")
 	if err := makeISO(unattend, "VEEMS", map[string][]byte{
 		"autounattend.xml": []byte(uaText),
@@ -225,7 +235,7 @@ func buildWindows(p *Profile, o BuildOpts) error {
 		return err
 	}
 	logf("installing Windows unattended (15-30 minutes, runs once)")
-	if err := runToPoweroff(Spec{OS: p.OS, Dir: work, Disk: disk, CPUs: 4, MemMB: 4096, Net: true,
+	if err := runToPoweroff(Spec{OS: p.OS, Desktop: p.Desktop, Dir: work, Disk: disk, CPUs: 4, MemMB: 4096, Net: true,
 		CDROMs:  []string{iso, virtio, unattend},
 		ROBinds: []string{filepath.Dir(iso), cacheDir()}}, 90*time.Minute); err != nil {
 		return err
@@ -236,8 +246,8 @@ func buildWindows(p *Profile, o BuildOpts) error {
 // installBase compacts the finished build disk into the read-only base image.
 func installBase(p *Profile, work, disk string) error {
 	logf("compacting base image")
-	base := basePath(p.OS)
-	for _, f := range []string{base, tmplDisk(p.OS), tmplState(p.OS), tmplMeta(p.OS)} {
+	base := basePath(p.Key)
+	for _, f := range []string{base, tmplDisk(p.Key), tmplState(p.Key), tmplMeta(p.Key)} {
 		os.Chmod(f, 0o644)
 		os.Remove(f)
 	}
@@ -256,21 +266,21 @@ func installBase(p *Profile, work, disk string) error {
 // state onto a fresh copy-on-write disk instead of booting.
 func captureSnapshot(p *Profile) error {
 	start := time.Now()
-	work := filepath.Join(imageDir(p.OS), "snap-work")
+	work := filepath.Join(imageDir(p.Key), "snap-work")
 	os.RemoveAll(work)
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		return err
 	}
 	defer os.RemoveAll(work)
-	for _, f := range []string{tmplDisk(p.OS), tmplState(p.OS), tmplMeta(p.OS)} {
+	for _, f := range []string{tmplDisk(p.Key), tmplState(p.Key), tmplMeta(p.Key)} {
 		os.Chmod(f, 0o644)
 		os.Remove(f)
 	}
 	disk := filepath.Join(work, "snap.qcow2")
-	if err := qemuImgCreate(disk, basePath(p.OS), 0); err != nil {
+	if err := qemuImgCreate(disk, basePath(p.Key), 0); err != nil {
 		return err
 	}
-	s := Spec{OS: p.OS, Dir: work, Disk: disk, CPUs: p.CPUs, MemMB: p.MemMB, ROBinds: []string{imageDir(p.OS)}}
+	s := Spec{OS: p.OS, Desktop: p.Desktop, Dir: work, Disk: disk, CPUs: p.CPUs, MemMB: p.MemMB, ROBinds: []string{imageDir(p.Key)}}
 	cmd, err := launchCmd(s)
 	if err != nil {
 		return err
@@ -286,7 +296,7 @@ func captureSnapshot(p *Profile) error {
 	defer killOnSignal(work)()
 	defer func() { killVMProcs(work); cmd.Process.Kill(); <-done }()
 
-	logf("booting %s to snapshot it", p.OS)
+	logf("booting %s to snapshot it", p.Key)
 	deadline := time.Now().Add(time.Duration(p.Boot) * time.Second)
 	for agentCall(work, "guest-ping", nil, nil, 2*time.Second) != nil {
 		select {
@@ -301,8 +311,11 @@ func captureSnapshot(p *Profile) error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	settle := 5 * time.Second
-	if p.OS == "windows" {
+	switch {
+	case p.OS == "windows":
 		settle = 3 * time.Minute // let first-boot work (.NET, services) finish so clones start idle
+	case p.Desktop:
+		settle = 40 * time.Second // the desktop session logs in and settles
 	}
 	logf("guest up after %s; letting it settle for %s", time.Since(start).Round(time.Second), settle)
 	time.Sleep(settle)
@@ -357,19 +370,19 @@ func captureSnapshot(p *Profile) error {
 	qmp(work, "quit", nil, 5*time.Second)
 	<-done
 
-	if err := os.Rename(disk, tmplDisk(p.OS)); err != nil {
+	if err := os.Rename(disk, tmplDisk(p.Key)); err != nil {
 		return err
 	}
-	if err := os.Rename(state, tmplState(p.OS)); err != nil {
+	if err := os.Rename(state, tmplState(p.Key)); err != nil {
 		return err
 	}
-	os.Chmod(tmplDisk(p.OS), 0o444)
-	os.Chmod(tmplState(p.OS), 0o444)
+	os.Chmod(tmplDisk(p.Key), 0o444)
+	os.Chmod(tmplState(p.Key), 0o444)
 	b, _ := json.Marshal(snapInfo{QEMU: qemuVersion(), CPUs: p.CPUs, MemMB: p.MemMB})
-	if err := os.WriteFile(tmplMeta(p.OS), b, 0o644); err != nil {
+	if err := os.WriteFile(tmplMeta(p.Key), b, 0o644); err != nil {
 		return err
 	}
-	st, _ := os.Stat(tmplState(p.OS))
+	st, _ := os.Stat(tmplState(p.Key))
 	logf("snapshot saved (%d MB state) in %s", st.Size()>>20, time.Since(start).Round(time.Second))
 	return nil
 }

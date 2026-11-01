@@ -27,7 +27,7 @@ func readChunk(m *Meta) int {
 
 // guestPath makes a guest path absolute, relative paths starting at the work dir.
 func guestPath(m *Meta, p string) string {
-	prof, _ := profile(m.OS)
+	prof := metaProfile(m)
 	if m.OS == "windows" {
 		p = strings.ReplaceAll(p, "/", `\`)
 		if p == "" || p == "." {

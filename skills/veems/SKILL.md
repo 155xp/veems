@@ -43,6 +43,30 @@ VM=$(veems new linux --net)
 veems exec $VM 'apt-get update -qq && apt-get install -y -qq nodejs'
 ```
 
+## Desktop VMs (only when you need a screen)
+
+Add `--desktop` when the task needs a GUI: testing a web app in a real
+browser, a desktop app, or anything you must see and click. They use more
+memory (Linux 2 GB, Windows 4 GB), so stay headless otherwise.
+
+- Linux desktop: Xfce with Chromium, logged in as user `agent` on `DISPLAY=:0` (exec already sets DISPLAY, so `xdotool` and `wmctrl` work).
+- Windows desktop: Windows Server 2025 with the full desktop, logged in as Administrator.
+
+```bash
+VM=$(veems new linux --desktop --net)
+veems exec $VM --gui 'chromium https://example.com'  # opens on the desktop, returns at once
+sleep 3; veems screenshot $VM shot.png               # prints "shot.png 1280x800"; look at it
+veems click $VM 640 400                              # x y in screenshot pixels (--right, --double)
+veems type $VM 'hello world'                         # ASCII text, US keyboard
+veems key $VM ctrl+l enter                           # combos run in order
+veems scroll $VM down 5
+veems drag $VM 100 100 400 300
+```
+
+Take a fresh screenshot after each action to check its effect. Plain
+`veems exec` (without `--gui`) still captures output, so you can launch and
+check things from the shell too. The user can watch with `veems view $VM`.
+
 ## Details that matter
 
 - `veems exec` exits with the command's exit code; stdout and stderr stay separate. `--json` gives `{exit_code, stdout, stderr}`.
@@ -51,7 +75,6 @@ veems exec $VM 'apt-get update -qq && apt-get install -y -qq nodejs'
 - Commands run as root (Linux) / SYSTEM (Windows). Default working dir: `/work` or `C:\work`. Use `--cwd DIR`, `--env K=V`, `--stdin` (pipes your stdin in).
 - Relative or empty paths in `cp` are under the work dir: `$VM:` means `/work`. A trailing `/` on the destination puts the file inside that dir.
 - Windows shell lines are PowerShell: `veems exec $VM 'Get-ChildItem; .\app.exe --help'`. For cmd syntax: `veems exec $VM -- cmd /c "dir /b"`.
-- `veems screenshot $VM shot.png` captures the VM's screen (useful for GUI work on Windows).
 - `veems ls` lists running VMs and when each will stop. Ids accept a unique prefix, or use `--name` on `new`.
 - Each VM is independent; several agents can run many VMs at once, and several commands can hit one VM at once.
 

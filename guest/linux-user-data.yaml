@@ -33,6 +33,8 @@ write_files:
       GRUB_TIMEOUT=0
       GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT quiet mitigations=auto"
 runcmd:
+  # Desktop builds ship desktop.sh on the seed disk.
+  - sh -c 'mkdir -p /mnt/seed && mount -o ro LABEL=CIDATA /mnt/seed && if [ -f /mnt/seed/desktop.sh ]; then sh /mnt/seed/desktop.sh; fi; umount /mnt/seed || true'
   - mkdir -p /work
   - rm -f /etc/netplan/*.yaml /etc/network/interfaces.d/*
   - systemctl enable systemd-networkd

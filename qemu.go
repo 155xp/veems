@@ -17,6 +17,7 @@ const qemuBin = "qemu-system-x86_64"
 // restore must produce identical device lists, so both go through qemuArgs.
 type Spec struct {
 	OS       string
+	Desktop  bool   // graphical image: bigger screen, USB tablet, VNC socket
 	Dir      string // holds sockets, logs, and (usually) the disk
 	Disk     string
 	CPUs     int
@@ -48,7 +49,11 @@ func qemuArgs(s Spec) []string {
 		)
 	} else {
 		// GRUB's BIOS build resets the machine when there is no VGA at all.
-		a = append(a, "-machine", "q35,accel=kvm", "-cpu", "host", "-device", "VGA,vgamem_mb=4")
+		vga := "VGA,vgamem_mb=4"
+		if s.Desktop {
+			vga = "VGA,vgamem_mb=16"
+		}
+		a = append(a, "-machine", "q35,accel=kvm", "-cpu", "host", "-device", vga)
 	}
 	a = append(a,
 		// New VM generation ID on every restore: guests reseed their RNG, so
@@ -80,6 +85,12 @@ func qemuArgs(s Spec) []string {
 		"-serial", "chardev:ser0",
 		"-qmp", "unix:"+filepath.Join(s.Dir, "qmp.sock")+",server=on,wait=off",
 	)
+	if s.Desktop {
+		// An absolute pointer so clicks land where they are aimed, and a VNC
+		// server on a socket only this user can open (`veems view`).
+		a = append(a, "-device", "qemu-xhci,id=usb", "-device", "usb-tablet,bus=usb.0",
+			"-vnc", "unix:"+filepath.Join(s.Dir, "vnc.sock"))
+	}
 	for i, iso := range s.CDROMs {
 		id := fmt.Sprintf("cd%d", i)
 		a = append(a, "-drive", "if=none,media=cdrom,readonly=on,id="+id+",file="+iso,

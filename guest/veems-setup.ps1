@@ -49,6 +49,19 @@ if (Get-Command Set-SConfig -ErrorAction SilentlyContinue) { Set-SConfig -AutoLa
 Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
 Uninstall-WindowsFeature Windows-Defender -ErrorAction SilentlyContinue
 
+if ({{DESKTOP}}) {
+  # Log in as Administrator at every boot so a desktop is always up.
+  $wl = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+  Set-ItemProperty $wl AutoAdminLogon '1'
+  Set-ItemProperty $wl DefaultUserName 'Administrator'
+  Set-ItemProperty $wl DefaultPassword '{{PASSWORD}}'
+  Remove-ItemProperty $wl AutoLogonCount -ErrorAction SilentlyContinue
+  reg add "HKLM\SOFTWARE\Microsoft\ServerManager" /v DoNotOpenServerManagerAtLogon /t REG_DWORD /d 1 /f
+  reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop" /v ScreenSaveActive /t REG_SZ /d 0 /f
+  reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization" /v NoLockScreen /t REG_DWORD /d 1 /f
+  reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Reliability" /v ShutdownReasonOn /t REG_DWORD /d 0 /f
+  powercfg /change monitor-timeout-ac 0
+}
 New-Item -ItemType Directory -Force C:\work, C:\veems | Out-Null
 $finish = @'
 Start-Transcript -Path C:\veems-finish.log

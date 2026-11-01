@@ -18,10 +18,10 @@ const version = "0.1.0"
 
 const usage = `veems: fresh, sandboxed Linux/Windows VMs for agents.
 
-Use linux unless the task needs Windows. A Linux VM uses about a third of
-the memory and starts faster.
+Use linux unless the task needs Windows: it starts faster, runs commands
+faster, and uses about a third of the memory.
 
-  veems new linux                 start a fresh VM, print its id (about 1 s)
+  veems new linux                 start a fresh VM, print its id (~0.3 s)
   veems exec <vm> 'uname -a'      run a shell line (bash; PowerShell on Windows)
   veems exec <vm> -- python3 -V   run a program with arguments, no shell
   veems cp ./src <vm>:dest        copy a file or directory in
@@ -29,32 +29,43 @@ the memory and starts faster.
   veems rm <vm>                   stop it and delete everything
   veems run linux -- make test    new + exec + rm in one step
 
-Every VM starts from the same clean snapshot, and nothing it does can reach
-your machine: no shared folders, no network unless you pass --net, and even
-then no access to this host or the LAN, only the internet.
+Every VM starts from the same clean snapshot and is deleted when it stops.
+Nothing it does can reach your machine: no shared folders, no network unless
+you pass --net, and even then only the internet, never this host or the LAN.
 
 VMs remove themselves after 20 min with no veems commands (--idle) or 2 h in
 total (--ttl), whichever comes first. Still run 'veems rm' when you are done.
 
 Commands
-  new <linux|windows> [--net] [--name N] [--ttl 2h] [--idle 20m] [--cpus N] [--mem MB] [--cold] [--json]
-  exec <vm> [--cwd DIR] [--env K=V]... [--timeout 10m] [--stdin] [--json] ('line' | -- prog args...)
+  new <linux|windows> [--desktop] [--net] [--name N] [--ttl 2h] [--idle 20m]
+      [--cpus N] [--mem MB] [--cold] [--json]
+  exec <vm> [--cwd DIR] [--env K=V]... [--timeout 10m] [--stdin] [--gui] [--json]
+      ('line' | -- prog args...)        --gui: start it on the desktop, return at once
   cp <src> <dst>         one side is <vm>:path; a relative or empty path is
                          under the work dir (/work, C:\work)
-  run <linux|windows> [new flags] [--push LOCAL:REMOTE]... [--pull REMOTE:LOCAL]... ('line' | -- prog args...)
+  run <linux|windows> [new flags] [--push LOCAL:REMOTE]... [--pull REMOTE:LOCAL]...
+      ('line' | -- prog args...)
   ls [--json]            list running VMs
   rm <vm>... | --all     destroy VMs
   ttl <vm> [--ttl D] [--idle D]   change a running VM's limits (0 = no limit)
-  screenshot <vm> out.png         capture the screen (PNG)
-  build <linux|windows> [--snapshot] [--iso PATH] [--desktop]   one-time image build
+  build <linux|windows> [--desktop] [--snapshot] [--iso PATH]   one-time image build
   doctor                 check this host
   skill [show|install]   print the agent skill, or install it for Claude
                          Code, Codex, OpenCode, oh-my-pi, and pi
 
+Desktop (VMs started with --desktop; screenshot works on any VM)
+  screenshot <vm> [out.png]       save the screen, prints "file WIDTHxHEIGHT"
+  click <vm> X Y [--right] [--double]
+  move <vm> X Y
+  drag <vm> X1 Y1 X2 Y2
+  scroll <vm> up|down|left|right [N]
+  type <vm> 'text'                type ASCII text
+  key <vm> COMBO...               e.g. enter, ctrl+l, alt+f4, ctrl+alt+delete
+  view <vm> [--port N] [--no-open]   live, clickable view in your browser
+  X Y are pixels from the top-left of the screenshot.
+
 <vm> is an id like lnx-k3m9qa, a unique prefix of one, or a --name.
 'exec' exits with the command's exit code, or 124 on timeout.
-Network: with --net the VM can reach the internet only. Without it the VM
-has no network at all.
 `
 
 func main() {
@@ -80,8 +91,16 @@ func main() {
 		err = cmdRm(args)
 	case "ttl", "extend":
 		err = cmdTTL(args)
-	case "screenshot":
+	case "screenshot", "shot":
 		err = cmdScreenshot(args)
+	case "click", "move", "drag", "scroll":
+		err = cmdPointer(cmd, args)
+	case "type":
+		err = cmdType(args)
+	case "key", "keys":
+		err = cmdKey(args)
+	case "view":
+		err = cmdView(args)
 	case "build":
 		err = cmdBuild(args)
 	case "doctor":
@@ -195,10 +214,10 @@ func envDur(name string, def time.Duration) time.Duration {
 }
 
 const newValued = "name ttl idle cpus mem"
-const newBools = "net cold json"
+const newBools = "net cold json desktop"
 
 func newOpts(f *flags, osName string) (NewOpts, error) {
-	o := NewOpts{OS: osName, Name: f.str("name", ""), Net: f.bools["net"], Cold: f.bools["cold"]}
+	o := NewOpts{OS: osName, Desktop: f.bools["desktop"], Name: f.str("name", ""), Net: f.bools["net"], Cold: f.bools["cold"]}
 	var err error
 	if o.TTL, err = f.dur("ttl", envDur("VEEMS_TTL", 2*time.Hour)); err != nil {
 		return o, err
@@ -291,7 +310,7 @@ func emit(r *ExecResult, asJSON bool) int {
 }
 
 const execValued = "cwd env timeout"
-const execBools = "stdin json"
+const execBools = "stdin json gui"
 
 func cmdExec(args []string) (int, error) {
 	f, err := parse(args, execValued, execBools)
@@ -312,6 +331,9 @@ func cmdExec(args []string) (int, error) {
 	o, err := execTarget(f, f.pos[1:])
 	if err != nil {
 		return 2, err
+	}
+	if f.bools["gui"] {
+		return 0, launchGUI(m, o)
 	}
 	r, err := guestExec(m, o)
 	if err != nil {
@@ -543,25 +565,131 @@ func cmdTTL(args []string) error {
 	return nil
 }
 
+// vmArg resolves the first positional argument to a VM.
+func vmArg(pos []string, usage string) (*Meta, []string, error) {
+	if len(pos) == 0 {
+		return nil, nil, fmt.Errorf("usage: veems %s", usage)
+	}
+	id, err := resolve(pos[0])
+	if err != nil {
+		return nil, nil, err
+	}
+	m, err := loadMeta(id)
+	return m, pos[1:], err
+}
+
 func cmdScreenshot(args []string) error {
-	if len(args) != 2 {
-		return fmt.Errorf("usage: veems screenshot <vm> out.png")
-	}
-	id, err := resolve(args[0])
+	m, rest, err := vmArg(args, "screenshot <vm> [out.png]")
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(vmDir(id), "screen.png")
-	touch(id)
-	if _, err := qmp(vmDir(id), "screendump", map[string]any{"filename": tmp, "format": "png"}, 30*time.Second); err != nil {
-		return err
+	out := m.ID + ".png"
+	if len(rest) > 0 {
+		out = rest[0]
 	}
-	b, err := os.ReadFile(tmp)
+	touch(m.ID)
+	png, w, h, err := screenshot(m.ID)
 	if err != nil {
 		return err
 	}
-	os.Remove(tmp)
-	return os.WriteFile(args[1], b, 0o644)
+	if err := os.WriteFile(out, png, 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("%s %dx%d\n", out, w, h)
+	return nil
+}
+
+func cmdPointer(cmd string, args []string) error {
+	f, err := parse(args, "button", "double right")
+	if err != nil {
+		return err
+	}
+	usage := map[string]string{
+		"click": "click <vm> X Y [--right] [--double]", "move": "move <vm> X Y",
+		"drag": "drag <vm> X1 Y1 X2 Y2", "scroll": "scroll <vm> up|down|left|right [N] [--at X Y]",
+	}[cmd]
+	m, rest, err := vmArg(f.pos, usage)
+	if err != nil {
+		return err
+	}
+	p, err := newPointer(m)
+	if err != nil {
+		return err
+	}
+	defer p.q.Close()
+	if cmd == "scroll" {
+		if len(rest) < 1 {
+			return fmt.Errorf("usage: veems %s", usage)
+		}
+		n := 3
+		if len(rest) > 1 {
+			if n, err = strconv.Atoi(rest[1]); err != nil {
+				return err
+			}
+		}
+		return p.scroll(rest[0], n)
+	}
+	want := map[string]int{"click": 2, "move": 2, "drag": 4}[cmd]
+	if len(rest) != want {
+		return fmt.Errorf("usage: veems %s  (pixels from the top-left of `veems screenshot`)", usage)
+	}
+	xy, err := atoiArgs(rest)
+	if err != nil {
+		return err
+	}
+	switch cmd {
+	case "move":
+		return p.move(xy[0], xy[1])
+	case "drag":
+		return p.drag(xy[0], xy[1], xy[2], xy[3])
+	}
+	button := f.str("button", "left")
+	if f.bools["right"] {
+		button = "right"
+	}
+	count := 1
+	if f.bools["double"] {
+		count = 2
+	}
+	return p.click(xy[0], xy[1], button, count)
+}
+
+func cmdType(args []string) error {
+	m, rest, err := vmArg(args, "type <vm> 'text'")
+	if err != nil {
+		return err
+	}
+	if len(rest) != 1 {
+		return fmt.Errorf("usage: veems type <vm> 'text'")
+	}
+	return typeText(m, rest[0])
+}
+
+func cmdKey(args []string) error {
+	m, rest, err := vmArg(args, "key <vm> COMBO...  (e.g. enter, ctrl+l, alt+f4, ctrl+alt+delete)")
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 {
+		return fmt.Errorf("usage: veems key <vm> COMBO...  (e.g. enter, ctrl+l, alt+f4)")
+	}
+	return pressKeys(m, rest)
+}
+
+func cmdView(args []string) error {
+	f, err := parse(args, "port", "no-open")
+	if err != nil {
+		return err
+	}
+	m, _, err := vmArg(f.pos, "view <vm> [--port N] [--no-open]")
+	if err != nil {
+		return err
+	}
+	port, err := f.num("port")
+	if err != nil {
+		return err
+	}
+	return view(m, port, !f.bools["no-open"])
 }
 
 func cmdBuild(args []string) error {
@@ -577,12 +705,12 @@ func cmdBuild(args []string) error {
 		targets = []string{"linux", "windows"}
 	}
 	for _, t := range targets {
-		p, err := profile(t)
+		p, err := profile(t, f.bools["desktop"])
 		if err != nil {
 			return err
 		}
 		if err := build(BuildOpts{OS: p.OS, Snapshot: f.bools["snapshot"], ISO: f.str("iso", ""), Desktop: f.bools["desktop"]}); err != nil {
-			return fmt.Errorf("build %s: %w", p.OS, err)
+			return fmt.Errorf("build %s: %w", p.Key, err)
 		}
 	}
 	return nil
@@ -615,17 +743,25 @@ func cmdDoctor() error {
 	check("nft", err, "apt install nftables")
 	err = exec.Command("bwrap", "--unshare-all", "--ro-bind", "/", "/", "true").Run()
 	check("unprivileged sandbox (bwrap)", err, "allow unprivileged user namespaces (kernel.unprivileged_userns_clone=1)")
-	for _, os_ := range []string{"linux", "windows"} {
+	for _, key := range []string{"linux", "windows", "linux-desktop", "windows-desktop"} {
+		p := profiles[key]
+		fix := "veems build " + p.OS
+		if p.Desktop {
+			fix += " --desktop"
+		}
 		var err error
 		switch {
-		case !exists(basePath(os_)):
+		case !exists(basePath(key)) && p.Desktop:
+			fmt.Printf("  --    %s not built (optional: %s)\n", key, fix)
+			continue
+		case !exists(basePath(key)):
 			err = fmt.Errorf("not built")
-		case readSnap(os_) == nil:
+		case readSnap(key) == nil:
 			err = fmt.Errorf("base image present, no snapshot (VMs cold boot)")
-		case readSnap(os_).QEMU != qemuVersion():
+		case readSnap(key).QEMU != qemuVersion():
 			err = fmt.Errorf("snapshot is from another QEMU version")
 		}
-		check(os_+" image + snapshot", err, "veems build "+os_)
+		check(key+" image + snapshot", err, fix)
 	}
 	if b, err := os.ReadFile("/sys/kernel/mm/ksm/run"); err == nil && strings.TrimSpace(string(b)) != "1" {
 		fmt.Println("  tip   KSM is off; `echo 1 | sudo tee /sys/kernel/mm/ksm/run` lets identical VMs share memory")

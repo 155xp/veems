@@ -21,6 +21,7 @@ type Meta struct {
 	ID       string    `json:"id"`
 	Name     string    `json:"name,omitempty"`
 	OS       string    `json:"os"`
+	Desktop  bool      `json:"desktop,omitempty"`
 	CPUs     int       `json:"cpus"`
 	MemMB    int       `json:"mem_mb"`
 	Net      bool      `json:"net"`
@@ -62,15 +63,16 @@ func newID(prefix string) string {
 }
 
 type NewOpts struct {
-	OS    string
-	Name  string
-	CPUs  int
-	MemMB int
-	Net   bool
-	TTL   time.Duration
-	Idle  time.Duration
-	Cold  bool
-	Quiet bool
+	OS      string
+	Desktop bool
+	Name    string
+	CPUs    int
+	MemMB   int
+	Net     bool
+	TTL     time.Duration
+	Idle    time.Duration
+	Cold    bool
+	Quiet   bool
 }
 
 type snapInfo struct {
@@ -79,9 +81,9 @@ type snapInfo struct {
 	MemMB int    `json:"mem_mb"`
 }
 
-func readSnap(os_ string) *snapInfo {
-	b, err := os.ReadFile(tmplMeta(os_))
-	if err != nil || !exists(tmplState(os_)) || !exists(tmplDisk(os_)) {
+func readSnap(key string) *snapInfo {
+	b, err := os.ReadFile(tmplMeta(key))
+	if err != nil || !exists(tmplState(key)) || !exists(tmplDisk(key)) {
 		return nil
 	}
 	var s snapInfo
@@ -92,12 +94,16 @@ func readSnap(os_ string) *snapInfo {
 }
 
 func createVM(o NewOpts) (*Meta, error) {
-	p, err := profile(o.OS)
+	p, err := profile(o.OS, o.Desktop)
 	if err != nil {
 		return nil, err
 	}
-	if !exists(basePath(p.OS)) {
-		return nil, fmt.Errorf("no %s image yet: run `veems build %s` once", p.OS, p.OS)
+	if !exists(basePath(p.Key)) {
+		flag := ""
+		if p.Desktop {
+			flag = " --desktop"
+		}
+		return nil, fmt.Errorf("no %s image yet: run `veems build %s%s` once", p.Key, p.OS, flag)
 	}
 	if o.CPUs == 0 {
 		o.CPUs = p.CPUs
@@ -109,13 +115,13 @@ func createVM(o NewOpts) (*Meta, error) {
 	if err := checkHostMemory(o.MemMB); err != nil {
 		return nil, err
 	}
-	snap := readSnap(p.OS)
+	snap := readSnap(p.Key)
 	useSnap := !o.Cold && snap != nil && snap.CPUs == o.CPUs && snap.MemMB == o.MemMB && snap.QEMU == qemuVersion()
 	if !o.Cold && snap != nil && !useSnap && !o.Quiet {
-		fmt.Fprintf(os.Stderr, "veems: snapshot does not match (cpus/mem/qemu version), cold booting; `veems build %s --snapshot` refreshes it\n", p.OS)
+		fmt.Fprintf(os.Stderr, "veems: snapshot does not match (cpus/mem/qemu version), cold booting; `veems build %s --snapshot` refreshes it\n", p.Key)
 	}
 
-	m := &Meta{ID: newID(p.Prefix), Name: o.Name, OS: p.OS, CPUs: o.CPUs, MemMB: o.MemMB, Net: o.Net,
+	m := &Meta{ID: newID(p.Prefix), Name: o.Name, OS: p.OS, Desktop: p.Desktop, CPUs: o.CPUs, MemMB: o.MemMB, Net: o.Net,
 		Snapshot: useSnap, Created: time.Now().UTC(), IdleSecs: int(o.Idle.Seconds())}
 	if o.TTL > 0 {
 		m.Deadline = m.Created.Add(o.TTL)
@@ -125,9 +131,9 @@ func createVM(o NewOpts) (*Meta, error) {
 		return nil, err
 	}
 	fail := func(err error) (*Meta, error) { os.RemoveAll(dir); return nil, err }
-	backing := basePath(p.OS)
+	backing := basePath(p.Key)
 	if useSnap {
-		backing = tmplDisk(p.OS)
+		backing = tmplDisk(p.Key)
 	}
 	if err := qemuImgCreate(filepath.Join(dir, "disk.qcow2"), backing, 0); err != nil {
 		return fail(err)
@@ -221,11 +227,11 @@ func supervise(id string) error {
 	saveMeta(m)
 	syscall.Setpriority(syscall.PRIO_PROCESS, 0, 10) // the host comes first
 
-	p, _ := profile(m.OS)
-	s := Spec{OS: m.OS, Dir: dir, Disk: filepath.Join(dir, "disk.qcow2"), CPUs: m.CPUs, MemMB: m.MemMB,
-		Net: m.Net, ROBinds: []string{imageDir(m.OS)}}
+	p := metaProfile(m)
+	s := Spec{OS: m.OS, Desktop: m.Desktop, Dir: dir, Disk: filepath.Join(dir, "disk.qcow2"), CPUs: m.CPUs, MemMB: m.MemMB,
+		Net: m.Net, ROBinds: []string{imageDir(p.Key)}}
 	if m.Snapshot {
-		s.Incoming = tmplState(p.OS)
+		s.Incoming = tmplState(p.Key)
 	}
 	cmd, err := launchCmd(s)
 	if err != nil {

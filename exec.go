@@ -42,7 +42,7 @@ func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + 
 // guestCommand turns ExecOpts into the program, arguments, and environment
 // handed to the guest agent.
 func guestCommand(m *Meta, o ExecOpts) (path string, args, env []string) {
-	p, _ := profile(m.OS)
+	p := metaProfile(m)
 	cwd := o.Cwd
 	if cwd == "" {
 		cwd = p.WorkDir
@@ -50,7 +50,11 @@ func guestCommand(m *Meta, o ExecOpts) (path string, args, env []string) {
 	if m.OS == "windows" {
 		return "powershell.exe", nil, nil // script set up by guestExec
 	}
-	env = append([]string{"HOME=/root", "USER=root", "PATH=" + linuxPath, "LANG=C.UTF-8", "TERM=dumb"}, o.Env...)
+	env = []string{"HOME=/root", "USER=root", "PATH=" + linuxPath, "LANG=C.UTF-8", "TERM=dumb"}
+	if m.Desktop { // so xdotool, wmctrl, and friends reach the desktop
+		env = append(env, "DISPLAY=:0", "XAUTHORITY=/home/agent/.Xauthority")
+	}
+	env = append(env, o.Env...)
 	cmd := o.Argv
 	if o.Line != "" {
 		cmd = []string{"/bin/bash", "-c", o.Line}
@@ -62,7 +66,7 @@ func guestCommand(m *Meta, o ExecOpts) (path string, args, env []string) {
 // psScript wraps a Windows command so errors print as plain text and the
 // exit code of the last native program (or 1 on a PowerShell error) comes back.
 func psScript(m *Meta, o ExecOpts) string {
-	p, _ := profile(m.OS)
+	p := metaProfile(m)
 	cwd := o.Cwd
 	if cwd == "" {
 		cwd = p.WorkDir
