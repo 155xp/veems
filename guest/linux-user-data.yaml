@@ -1,0 +1,51 @@
+#cloud-config
+# Runs once while `veems build linux` builds the base image, then powers off.
+hostname: veems
+package_update: true
+packages:
+  - qemu-guest-agent
+  - build-essential
+  - git
+  - curl
+  - ca-certificates
+  - python3
+  - python3-venv
+  - python3-pip
+  - jq
+  - unzip
+  - zip
+  - xz-utils
+  - file
+  - procps
+  - psmisc
+  - less
+write_files:
+  - path: /etc/systemd/network/10-veems.network
+    content: |
+      [Match]
+      Name=en* eth*
+      [Network]
+      Address=10.0.2.15/24
+      Gateway=10.0.2.2
+      DNS=10.0.2.3
+  - path: /etc/default/grub.d/90-veems.cfg
+    content: |
+      GRUB_TIMEOUT=0
+      GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT quiet mitigations=auto"
+runcmd:
+  - mkdir -p /work
+  - rm -f /etc/netplan/*.yaml /etc/network/interfaces.d/*
+  - systemctl enable systemd-networkd
+  - systemctl disable systemd-resolved || true
+  - rm -f /etc/resolv.conf && echo 'nameserver 10.0.2.3' > /etc/resolv.conf
+  # Quiet box: no timers, updaters, or daemons that wake up on their own.
+  - systemctl mask apt-daily.timer apt-daily-upgrade.timer man-db.timer e2scrub_all.timer e2scrub_reap.service fstrim.timer dpkg-db-backup.timer logrotate.timer unattended-upgrades.service systemd-timesyncd.service chrony.service ssh.service ssh.socket systemd-networkd-wait-online.service || true
+  - apt-get purge -y unattended-upgrades || true
+  - update-grub
+  - apt-get clean
+  - touch /etc/cloud/cloud-init.disabled
+  - cloud-init clean --logs --seed || true
+  - fstrim -av || true
+power_state:
+  mode: poweroff
+  timeout: 60
