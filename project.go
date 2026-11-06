@@ -315,6 +315,7 @@ func prepare(o PrepOpts) (*Project, error) {
 	if err := os.Rename(filepath.Join(dir, "snap.state"), filepath.Join(work, "snap.state")); err != nil {
 		return nil, err
 	}
+	destroy(m.ID) // QEMU holds the disk's write lock until it exits
 	os.Chmod(filepath.Join(work, "disk.qcow2"), 0o444)
 	os.Chmod(filepath.Join(work, "snap.state"), 0o444)
 	pj.Prepared = time.Now().UTC()

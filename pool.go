@@ -153,15 +153,11 @@ func refill(key string) {
 // new VMs until each pool is full or the host is short on memory. Fillers
 // queue on a lock, so the last one sees the latest state.
 func fillPools(verbose bool) error {
-	os.MkdirAll(veemsHome(), 0o755)
-	lock, err := os.OpenFile(filepath.Join(veemsHome(), "pool.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	unlock, err := lockPools()
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
+	defer unlock()
 	say := func(format string, a ...any) {
 		if verbose {
 			logf(format, a...)
@@ -276,8 +272,26 @@ func sortedKeys(m map[string]PoolTarget) []string {
 	return ks
 }
 
+// lockPools serializes pool changes and fills across processes.
+func lockPools() (unlock func(), err error) {
+	os.MkdirAll(veemsHome(), 0o755)
+	lock, err := os.OpenFile(filepath.Join(veemsHome(), "pool.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	return func() { lock.Close() }, nil
+}
+
 // setPool changes one pool's size (0 removes it) and fills or drains it now.
 func setPool(t PoolTarget) error {
+	unlock, err := lockPools()
+	if err != nil {
+		return err
+	}
 	var ts []PoolTarget
 	for _, cur := range loadPools() {
 		if cur.key() != t.key() {
@@ -287,7 +301,9 @@ func setPool(t PoolTarget) error {
 	if t.Size > 0 {
 		ts = append(ts, t)
 	}
-	if err := savePools(ts); err != nil {
+	err = savePools(ts)
+	unlock()
+	if err != nil {
 		return err
 	}
 	return fillPools(true)
