@@ -30,6 +30,11 @@ type Meta struct {
 	Deadline time.Time `json:"deadline,omitzero"` // hard stop; zero = none
 	IdleSecs int       `json:"idle_secs"`         // stop after this long with no veems activity; 0 = never
 	PID      int       `json:"pid"`               // supervisor
+	Project  string    `json:"project,omitempty"`
+	Source   string    `json:"source,omitempty"`  // stamp of the snapshot or disk it started from
+	Pool     string    `json:"pool,omitempty"`    // waiting in this pool, not yet claimed
+	Pooled   bool      `json:"-"`                 // this process claimed it from a pool
+	NetHub   bool      `json:"net_hub,omitempty"` // network on a detachable hub (project prep)
 }
 
 func metaPath(id string) string { return filepath.Join(vmDir(id), "meta.json") }
@@ -73,6 +78,10 @@ type NewOpts struct {
 	Idle    time.Duration
 	Cold    bool
 	Quiet   bool
+	Project string // start from this project's snapshot
+	NoPool  bool   // never claim a pooled VM
+	Pool    string // start a VM for this pool
+	NetHub  bool   // with Net: network that can be unplugged before a snapshot
 }
 
 type snapInfo struct {
@@ -94,16 +103,19 @@ func readSnap(key string) *snapInfo {
 }
 
 func createVM(o NewOpts) (*Meta, error) {
-	p, err := profile(o.OS, o.Desktop)
+	src, err := sourceFor(o)
 	if err != nil {
 		return nil, err
 	}
-	if !exists(basePath(p.Key)) {
-		flag := ""
-		if p.Desktop {
-			flag = " --desktop"
+	p := src.prof
+	if o.Pool == "" {
+		key := poolKey(p.Key, src.project, o.Net)
+		defer refill(key)
+		if !o.Cold && !o.NoPool {
+			if m := claim(o, src); m != nil {
+				return m, nil
+			}
 		}
-		return nil, fmt.Errorf("no %s image yet: run `veems build %s%s` once", p.Key, p.OS, flag)
 	}
 	if o.CPUs == 0 {
 		o.CPUs = p.CPUs
@@ -113,16 +125,26 @@ func createVM(o NewOpts) (*Meta, error) {
 	}
 	listVMs() // sweeps up after crashed supervisors before counting memory
 	if err := checkHostMemory(o.MemMB); err != nil {
+		if o.Pool == "" && len(pooled("")) > 0 {
+			err = fmt.Errorf("%w; VMs waiting in a pool hold memory too (`veems pool` shows them)", err)
+		}
 		return nil, err
 	}
-	snap := readSnap(p.Key)
+	snap := src.snap
 	useSnap := !o.Cold && snap != nil && snap.CPUs == o.CPUs && snap.MemMB == o.MemMB && snap.QEMU == qemuVersion()
 	if !o.Cold && snap != nil && !useSnap && !o.Quiet {
-		fmt.Fprintf(os.Stderr, "veems: snapshot does not match (cpus/mem/qemu version), cold booting; `veems build %s --snapshot` refreshes it\n", p.Key)
+		fix := "`veems build " + p.Key + " --snapshot` refreshes it"
+		if src.project != "" {
+			fix = "the project was saved with " + fmt.Sprintf("%d cpus and %d MB", snap.CPUs, snap.MemMB)
+		}
+		fmt.Fprintf(os.Stderr, "veems: snapshot does not match (cpus/mem/qemu version), cold booting; %s\n", fix)
 	}
 
 	m := &Meta{ID: newID(p.Prefix), Name: o.Name, OS: p.OS, Desktop: p.Desktop, CPUs: o.CPUs, MemMB: o.MemMB, Net: o.Net,
-		Snapshot: useSnap, Created: time.Now().UTC(), IdleSecs: int(o.Idle.Seconds())}
+		Snapshot: useSnap, Created: time.Now().UTC(), IdleSecs: int(o.Idle.Seconds()), Project: src.project, Pool: o.Pool, NetHub: o.Net && o.NetHub}
+	if o.Pool != "" {
+		o.TTL, m.IdleSecs = 0, 0 // a waiting VM gets its limits when it is claimed
+	}
 	if o.TTL > 0 {
 		m.Deadline = m.Created.Add(o.TTL)
 	}
@@ -131,11 +153,14 @@ func createVM(o NewOpts) (*Meta, error) {
 		return nil, err
 	}
 	fail := func(err error) (*Meta, error) { os.RemoveAll(dir); return nil, err }
-	backing := basePath(p.Key)
-	if useSnap {
-		backing = tmplDisk(p.Key)
+	if !useSnap {
+		src.snap = nil
 	}
-	if err := qemuImgCreate(filepath.Join(dir, "disk.qcow2"), backing, 0); err != nil {
+	if src.project == "" && !useSnap {
+		src.disk = basePath(p.Key) // the image snapshot's disk only goes with its RAM state
+	}
+	m.Source = src.stamp()
+	if err := qemuImgCreate(filepath.Join(dir, "disk.qcow2"), src.disk, 0); err != nil {
 		return fail(err)
 	}
 	os.WriteFile(filepath.Join(dir, "activity"), nil, 0o600)
@@ -157,6 +182,7 @@ func createVM(o NewOpts) (*Meta, error) {
 	}
 	deadline := time.Now().Add(wait)
 	resumed := false
+	var pausedAt time.Time
 	for {
 		if !exists(dir) || exists(filepath.Join(dir, "exited")) {
 			log, _ := os.ReadFile(filepath.Join(dir, "qemu.log"))
@@ -168,7 +194,11 @@ func createVM(o NewOpts) (*Meta, error) {
 			if raw, err := qmp(dir, "query-status", nil, 2*time.Second); err == nil {
 				var st struct{ Status string }
 				json.Unmarshal(raw, &st)
-				if st.Status == "paused" {
+				if st.Status == "paused" && pausedAt.IsZero() {
+					pausedAt = time.Now()
+				}
+				// Resume once the agent proxy is connected (see agentProxy).
+				if st.Status == "paused" && (exists(filepath.Join(dir, "agent.sock")) || time.Since(pausedAt) > 2*time.Second) {
 					if _, err := qmp(dir, "cont", nil, 5*time.Second); err == nil {
 						resumed = true
 					}
@@ -176,17 +206,23 @@ func createVM(o NewOpts) (*Meta, error) {
 					resumed = true
 				}
 			}
-		} else if err := guestPing(m.ID, 2*time.Second); err == nil {
+		} else if a := guestSession(m.ID); a.call("guest-ping", nil, nil, 2*time.Second) == nil {
+			// A restored snapshot wakes up with the clock it was saved with.
+			// Same connection: a new one would wait out the agent's reconnect pause.
+			a.call("guest-set-time", map[string]any{"time": time.Now().UnixNano()}, nil, 10*time.Second)
+			a.close()
 			break
 		}
 		if time.Now().After(deadline) {
 			destroy(m.ID)
 			return nil, fmt.Errorf("vm did not become ready within %s", wait)
 		}
-		time.Sleep(50 * time.Millisecond)
+		if useSnap {
+			time.Sleep(5 * time.Millisecond) // a restore takes a few hundred ms
+		} else {
+			time.Sleep(50 * time.Millisecond)
+		}
 	}
-	// A restored snapshot wakes up with the clock it was saved with.
-	guestCall(m.ID, "guest-set-time", map[string]any{"time": time.Now().UnixNano()}, nil, 10*time.Second)
 	os.WriteFile(filepath.Join(dir, "ready"), nil, 0o600)
 	return m, nil
 }
@@ -227,11 +263,11 @@ func supervise(id string) error {
 	saveMeta(m)
 	syscall.Setpriority(syscall.PRIO_PROCESS, 0, 10) // the host comes first
 
-	p := metaProfile(m)
+	src := metaSource(m)
 	s := Spec{OS: m.OS, Desktop: m.Desktop, Dir: dir, Disk: filepath.Join(dir, "disk.qcow2"), CPUs: m.CPUs, MemMB: m.MemMB,
-		Net: m.Net, ROBinds: []string{imageDir(p.Key)}}
+		Net: m.Net, NetHub: m.NetHub, ROBinds: src.binds}
 	if m.Snapshot {
-		s.Incoming = tmplState(p.Key)
+		s.Incoming = src.state
 	}
 	cmd, err := launchCmd(s)
 	if err != nil {
@@ -247,6 +283,9 @@ func supervise(id string) error {
 	}
 	done := make(chan struct{})
 	go func() { cmd.Wait(); close(done) }()
+	if err := agentProxy(dir); err != nil {
+		fmt.Fprintln(logf, "veems: agent proxy:", err) // clients fall back to the agent socket
+	}
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	tick := time.NewTicker(5 * time.Second)
@@ -351,7 +390,7 @@ func resolve(ref string) (string, error) {
 	vms, _ := listVMs()
 	var hits []string
 	for _, m := range vms {
-		if m.Name == ref || strings.HasPrefix(m.ID, ref) {
+		if m.Pool == "" && (m.Name == ref || strings.HasPrefix(m.ID, ref)) {
 			hits = append(hits, m.ID)
 		}
 	}

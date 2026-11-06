@@ -12,8 +12,8 @@ this host or the local network. Break it however you like; then delete it.
 
 ## Pick Linux unless you need Windows
 
-- **linux** (Debian 13, 2 vCPU, 1 GB): ready in about 0.3 s, ~0.2 s per command. Has bash, python3, gcc/make, git, curl, jq.
-- **windows** (Server 2025 Core, 2 vCPU, 2 GB): ready in about 0.5 s, but every command runs through PowerShell, which takes 1 to 2 s. Uses three times the memory.
+- **linux** (Debian 13, 2 vCPU, 1 GB): ready in about 0.2 s, ~20 ms per command. Has bash, python3, gcc/make, git, curl, jq.
+- **windows** (Server 2025 Core, 2 vCPU, 2 GB): ready in about 0.3 s, but every command runs through PowerShell, which takes 1 to 2 s. Uses three times the memory.
 
 Use `windows` **only** when the task specifically needs Windows (a Windows
 binary, PowerShell, Windows paths or APIs, an .exe/.msi, a Windows-only bug).
@@ -42,6 +42,35 @@ Need the internet (apt, pip, npm, git clone)? Add `--net` to `new` or `run`:
 VM=$(veems new linux --net)
 veems exec $VM 'apt-get update -qq && apt-get install -y -qq nodejs'
 ```
+
+## Projects: VMs that start with the repo set up
+
+Run `veems project ls`. If the user has prepared a project for the repo you
+are working on, start from it instead of cloning and installing every time:
+
+```bash
+VM=$(veems new --project api)            # repo at /work/api (see DEST), setup already run
+veems exec $VM --cwd /work/api 'make test'
+```
+
+It is an ordinary throwaway VM (offline unless you add `--net`), restored
+from a snapshot taken right after the setup. If `new` says the project is out
+of date, run `veems project refresh NAME` (it re-clones and re-runs setup,
+which can take minutes).
+
+When you will start many VMs for one repo, you can prepare a project
+yourself; it costs one setup run and a few hundred MB of disk:
+
+```bash
+veems project add api linux --git https://github.com/org/api --setup 'make deps && make test'
+```
+
+`--src ./dir` copies a local directory instead of cloning. Uncommitted local
+changes are not in a `--git` project: `veems cp` them in.
+
+If `veems pool` lists a pool for what you need, `veems new` hands you a VM
+from it in a few milliseconds; nothing else changes. Don't create pools unless
+the user asks: waiting VMs hold memory on this machine.
 
 ## Desktop VMs (only when you need a screen)
 
@@ -75,7 +104,7 @@ check things from the shell too. The user can watch with `veems view $VM`.
 - Commands run as root (Linux) / SYSTEM (Windows). Default working dir: `/work` or `C:\work`. Use `--cwd DIR`, `--env K=V`, `--stdin` (pipes your stdin in).
 - Relative or empty paths in `cp` are under the work dir: `$VM:` means `/work`. A trailing `/` on the destination puts the file inside that dir.
 - Windows shell lines are PowerShell: `veems exec $VM 'Get-ChildItem; .\app.exe --help'`. For cmd syntax: `veems exec $VM -- cmd /c "dir /b"`.
-- `veems ls` lists running VMs and when each will stop. Ids accept a unique prefix, or use `--name` on `new`.
+- `veems ls` lists running VMs and when each will stop (pooled VMs that are still waiting are not listed; `veems rm --all` leaves them alone). Ids accept a unique prefix, or use `--name` on `new`.
 - Each VM is independent; several agents can run many VMs at once, and several commands can hit one VM at once.
 
 ## Cleanup (automatic, but do it yourself)

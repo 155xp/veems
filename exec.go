@@ -94,12 +94,16 @@ func psScript(m *Meta, o ExecOpts) string {
 }
 
 func guestExec(m *Meta, o ExecOpts) (*ExecResult, error) {
+	// One connection for the whole exec: short commands finish before the
+	// session hands the agent back (see agentHold).
+	a := guestSession(m.ID)
+	defer a.close()
 	path, args, env := guestCommand(m, o)
 	if m.OS == "windows" {
 		// -EncodedCommand would turn stderr into CLIXML, so run a script file
 		// (it deletes itself first thing). UTF-8 with BOM so non-ASCII survives.
 		script := fmt.Sprintf(`C:\Windows\Temp\veems-%d.ps1`, time.Now().UnixNano())
-		if err := writeGuest(m, script, strings.NewReader("\ufeff"+psScript(m, o))); err != nil {
+		if err := writeFile(a, script, strings.NewReader("\ufeff"+psScript(m, o))); err != nil {
 			return nil, err
 		}
 		args = []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script}
@@ -114,17 +118,17 @@ func guestExec(m *Meta, o ExecOpts) (*ExecResult, error) {
 	var started struct {
 		PID int `json:"pid"`
 	}
-	if err := guestCall(m.ID, "guest-exec", req, &started, 60*time.Second); err != nil {
+	if err := a.call("guest-exec", req, &started, 60*time.Second); err != nil {
 		return nil, err
 	}
 	var deadline time.Time
 	if o.Timeout > 0 {
 		deadline = time.Now().Add(o.Timeout)
 	}
-	delay := 5 * time.Millisecond
+	delay := time.Millisecond
 	for {
 		var st execStatus
-		if err := guestCall(m.ID, "guest-exec-status", map[string]any{"pid": started.PID}, &st, 120*time.Second); err != nil {
+		if err := a.call("guest-exec-status", map[string]any{"pid": started.PID}, &st, 120*time.Second); err != nil {
 			return nil, err
 		}
 		if st.Exited {
@@ -140,12 +144,16 @@ func guestExec(m *Meta, o ExecOpts) (*ExecResult, error) {
 			return r, nil
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
+			a.close()
 			killGuestTree(m, started.PID)
 			return &ExecResult{ExitCode: 124, TimedOut: true}, nil
 		}
 		time.Sleep(delay)
 		if delay < 200*time.Millisecond {
 			delay = delay * 3 / 2
+			if delay < 2*time.Millisecond {
+				delay = 2 * time.Millisecond
+			}
 		}
 	}
 }

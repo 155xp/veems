@@ -342,30 +342,16 @@ func captureSnapshot(p *Profile) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 
+	// Save with the agent connected, as it is after every restore (see
+	// agentProxy), so clones answer at once.
+	a := &agentConn{dir: work}
+	defer a.close()
+	if err := a.call("guest-ping", nil, nil, 10*time.Second); err != nil {
+		return fmt.Errorf("guest agent: %w", err)
+	}
 	state := filepath.Join(work, "snap.state")
-	if _, err := qmp(work, "stop", nil, 30*time.Second); err != nil {
-		return fmt.Errorf("pausing vm: %w", err)
-	}
-	if _, err := qmp(work, "migrate", map[string]any{"uri": "file:" + state}, 30*time.Second); err != nil {
-		return fmt.Errorf("saving vm state: %w", err)
-	}
-	for {
-		raw, err := qmp(work, "query-migrate", nil, 10*time.Second)
-		if err != nil {
-			return err
-		}
-		var st struct {
-			Status string `json:"status"`
-			Error  string `json:"error-desc"`
-		}
-		json.Unmarshal(raw, &st)
-		if st.Status == "completed" {
-			break
-		}
-		if st.Status == "failed" || st.Status == "cancelled" {
-			return fmt.Errorf("saving vm state: %s %s", st.Status, st.Error)
-		}
-		time.Sleep(100 * time.Millisecond)
+	if err := saveState(work, state); err != nil {
+		return err
 	}
 	qmp(work, "quit", nil, 5*time.Second)
 	<-done
