@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
 
 const usage = `veems: fresh, sandboxed Linux/Windows VMs for agents.
 
@@ -38,7 +38,7 @@ total (--ttl), whichever comes first. Still run 'veems rm' when you are done.
 
 Commands
   new <linux|windows> [--desktop] [--net] [--name N] [--ttl 2h] [--idle 20m]
-      [--cpus N] [--mem MB] [--cold] [--json]
+      [--cpus N] [--mem MB] [--project NAME] [--no-pool] [--cold] [--json]
   exec <vm> [--cwd DIR] [--env K=V]... [--timeout 10m] [--stdin] [--gui] [--json]
       ('line' | -- prog args...)        --gui: start it on the desktop, return at once
   cp <src> <dst>         one side is <vm>:path; a relative or empty path is
@@ -49,6 +49,13 @@ Commands
   rm <vm>... | --all     destroy VMs
   ttl <vm> [--ttl D] [--idle D]   change a running VM's limits (0 = no limit)
   build <linux|windows> [--desktop] [--snapshot] [--iso PATH]   one-time image build
+  project add NAME <linux|windows> [--git URL [--ref REF] | --src DIR] [--setup 'line']
+      [--dest DIR] [--net]       save a VM with the code checked out and set up;
+                                 then 'new --project NAME' starts from it
+  project ls | refresh NAME | rm NAME
+  pool [<linux|windows> | --project NAME] N [--net] [--desktop]
+                                 keep N VMs restored and waiting, so 'new' just
+                                 claims one (0 removes the pool); 'pool' alone shows it
   doctor                 check this host
   skill [show|install]   print the agent skill, or install it for Claude
                          Code, Codex, OpenCode, oh-my-pi, and pi
@@ -73,7 +80,10 @@ func main() {
 		fmt.Print(usage)
 		os.Exit(2)
 	}
-	cmd, args := os.Args[1], os.Args[2:]
+	os.Exit(run(os.Args[1], os.Args[2:]))
+}
+
+func run(cmd string, args []string) int {
 	var err error
 	code := 0
 	switch cmd {
@@ -103,6 +113,10 @@ func main() {
 		err = cmdView(args)
 	case "build":
 		err = cmdBuild(args)
+	case "pool":
+		err = cmdPool(args)
+	case "project", "projects":
+		err = cmdProject(args)
 	case "doctor":
 		err = cmdDoctor()
 	case "skill":
@@ -113,6 +127,8 @@ func main() {
 		fmt.Print(usage)
 	case "_supervise":
 		err = supervise(args[0])
+	case "_pool-fill":
+		err = fillPools(false)
 	default:
 		err = fmt.Errorf("unknown command %q (see `veems help`)", cmd)
 		code = 2
@@ -123,7 +139,7 @@ func main() {
 			code = 1
 		}
 	}
-	os.Exit(code)
+	return code
 }
 
 // flags is a tiny parser that allows flags anywhere before "--".
@@ -213,11 +229,12 @@ func envDur(name string, def time.Duration) time.Duration {
 	return def
 }
 
-const newValued = "name ttl idle cpus mem"
-const newBools = "net cold json desktop"
+const newValued = "name ttl idle cpus mem project"
+const newBools = "net cold json desktop no-pool"
 
 func newOpts(f *flags, osName string) (NewOpts, error) {
-	o := NewOpts{OS: osName, Desktop: f.bools["desktop"], Name: f.str("name", ""), Net: f.bools["net"], Cold: f.bools["cold"]}
+	o := NewOpts{OS: osName, Desktop: f.bools["desktop"], Name: f.str("name", ""), Net: f.bools["net"], Cold: f.bools["cold"],
+		Project: f.str("project", ""), NoPool: f.bools["no-pool"]}
 	var err error
 	if o.TTL, err = f.dur("ttl", envDur("VEEMS_TTL", 2*time.Hour)); err != nil {
 		return o, err
@@ -244,10 +261,11 @@ func cmdNew(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(f.pos) != 1 {
-		return fmt.Errorf("usage: veems new <linux|windows> [flags]")
+	osName, ok := osArg(f, f.pos)
+	if !ok || len(f.pos) > 1 {
+		return fmt.Errorf("usage: veems new <linux|windows> [flags]  or  veems new --project NAME [flags]")
 	}
-	o, err := newOpts(f, f.pos[0])
+	o, err := newOpts(f, osName)
 	if err != nil {
 		return err
 	}
@@ -257,12 +275,27 @@ func cmdNew(args []string) error {
 		return err
 	}
 	if f.bools["json"] {
-		printJSON(map[string]any{"id": m.ID, "os": m.OS, "net": m.Net, "from_snapshot": m.Snapshot,
-			"ready_ms": time.Since(start).Milliseconds(), "deadline": m.Deadline, "idle_secs": m.IdleSecs})
+		printJSON(map[string]any{"id": m.ID, "os": m.OS, "net": m.Net, "from_snapshot": m.Snapshot, "from_pool": m.Pooled,
+			"project": m.Project, "ready_ms": time.Since(start).Milliseconds(), "deadline": m.Deadline, "idle_secs": m.IdleSecs})
 		return nil
 	}
 	fmt.Println(m.ID)
 	return nil
+}
+
+func first(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
+}
+
+// osArg is the os positional, which --project makes optional.
+func osArg(f *flags, pos []string) (string, bool) {
+	if len(pos) > 0 {
+		return pos[0], true
+	}
+	return "", f.str("project", "") != ""
 }
 
 // execTarget turns positionals and the part after "--" into ExecOpts.
@@ -385,14 +418,18 @@ func cmdRun(args []string) (int, error) {
 	if err != nil {
 		return 2, err
 	}
-	if len(f.pos) < 1 {
-		return 2, fmt.Errorf("usage: veems run <linux|windows> [flags] ('line' | -- prog args...)")
+	pos, osName := f.pos, ""
+	if _, err := profile(first(pos), false); err == nil || f.str("project", "") == "" {
+		if len(pos) < 1 {
+			return 2, fmt.Errorf("usage: veems run <linux|windows> [flags] ('line' | -- prog args...)")
+		}
+		osName, pos = pos[0], pos[1:]
 	}
-	no, err := newOpts(f, f.pos[0])
+	no, err := newOpts(f, osName)
 	if err != nil {
 		return 2, err
 	}
-	eo, err := execTarget(f, f.pos[1:])
+	eo, err := execTarget(f, pos)
 	if err != nil {
 		return 2, err
 	}
@@ -442,9 +479,18 @@ func cmdLs(args []string) error {
 	if err != nil {
 		return err
 	}
-	vms, err := listVMs()
+	all, err := listVMs()
 	if err != nil {
 		return err
+	}
+	var vms []*Meta
+	waiting := 0
+	for _, m := range all {
+		if m.Pool != "" {
+			waiting++ // pooled, see `veems pool`
+		} else {
+			vms = append(vms, m)
+		}
 	}
 	if f.bools["json"] {
 		if vms == nil {
@@ -453,15 +499,18 @@ func cmdLs(args []string) error {
 		printJSON(vms)
 		return nil
 	}
+	if waiting > 0 {
+		defer fmt.Fprintf(os.Stderr, "(%d more waiting in the pool, see `veems pool`)\n", waiting)
+	}
 	if len(vms) == 0 {
 		fmt.Fprintln(os.Stderr, "no vms running")
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tOS\tCPUS\tMEM\tNET\tAGE\tSTOPS IN")
+	fmt.Fprintln(w, "ID\tNAME\tOS\tCPUS\tMEM\tNET\tAGE\tSTOPS IN\tPROJECT")
 	for _, m := range vms {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%dM\t%v\t%s\t%s\n", m.ID, m.Name, m.OS, m.CPUs, m.MemMB, m.Net,
-			time.Since(m.Created).Round(time.Second), stopsIn(m))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%dM\t%v\t%s\t%s\t%s\n", m.ID, m.Name, m.OS, m.CPUs, m.MemMB, m.Net,
+			time.Since(m.Created).Round(time.Second), stopsIn(m), m.Project)
 	}
 	return w.Flush()
 }
@@ -498,7 +547,9 @@ func cmdRm(args []string) error {
 		vms, _ := listVMs()
 		ids = nil
 		for _, m := range vms {
-			ids = append(ids, m.ID)
+			if m.Pool == "" { // the pool is drained with `veems pool <os> 0`
+				ids = append(ids, m.ID)
+			}
 		}
 	}
 	if len(ids) == 0 && !f.bools["all"] {
@@ -763,6 +814,11 @@ func cmdDoctor() error {
 		}
 		check(key+" image + snapshot", err, fix)
 	}
+	for _, pj := range listProjects() {
+		if why := pj.stale(); why != "" {
+			fmt.Printf("  --    project %s is out of date (%s): veems project refresh %s\n", pj.Name, why, pj.Name)
+		}
+	}
 	if b, err := os.ReadFile("/sys/kernel/mm/ksm/run"); err == nil && strings.TrimSpace(string(b)) != "1" {
 		fmt.Println("  tip   KSM is off; `echo 1 | sudo tee /sys/kernel/mm/ksm/run` lets identical VMs share memory")
 	}
@@ -770,4 +826,146 @@ func cmdDoctor() error {
 		return fmt.Errorf("some checks failed")
 	}
 	return nil
+}
+
+func cmdPool(args []string) error {
+	f, err := parse(args, "project", "net desktop json")
+	if err != nil {
+		return err
+	}
+	if len(f.pos) == 0 {
+		return showPools(f.bools["json"])
+	}
+	if f.pos[0] == "fill" && len(f.pos) == 1 {
+		return fillPools(true)
+	}
+	usage := fmt.Errorf("usage: veems pool [<linux|windows> | --project NAME] N [--net] [--desktop]")
+	osName, ok := osArg(f, f.pos[:len(f.pos)-1])
+	if !ok || len(f.pos) > 2 {
+		return usage
+	}
+	n, err := strconv.Atoi(f.pos[len(f.pos)-1])
+	if err != nil || n < 0 {
+		return usage
+	}
+	t := PoolTarget{Project: f.str("project", ""), Net: f.bools["net"], Size: n}
+	if t.Project != "" {
+		src, err := projectSource(t.Project)
+		if err != nil && n > 0 {
+			return err
+		}
+		if src != nil {
+			t.Image = src.prof.Key
+		}
+	}
+	if osName != "" {
+		p, err := profile(osName, f.bools["desktop"])
+		if err != nil {
+			return err
+		}
+		if t.Project != "" && t.Image != "" && t.Image != p.Key {
+			return fmt.Errorf("project %s is a %s project", t.Project, t.Image)
+		}
+		t.Image = p.Key
+	}
+	if err := setPool(t); err != nil {
+		return err
+	}
+	return showPools(false)
+}
+
+const projectUsage = `usage:
+  veems project add NAME <linux|windows> [--git URL [--ref REF] | --src DIR]
+        [--setup 'line'] [--dest DIR] [--net] [--desktop] [--timeout 30m]
+  veems project ls [--json]
+  veems project refresh NAME     prepare it again: fresh checkout, setup, snapshot
+  veems project rm NAME`
+
+func cmdProject(args []string) error {
+	if len(args) == 0 {
+		args = []string{"ls"}
+	}
+	sub, args := args[0], args[1:]
+	switch sub {
+	case "add", "new", "create":
+		f, err := parse(args, "git ref src setup dest timeout", "net desktop")
+		if err != nil {
+			return err
+		}
+		if len(f.pos) != 2 {
+			return fmt.Errorf("%s", projectUsage)
+		}
+		o := PrepOpts{Name: f.pos[0], OS: f.pos[1], Desktop: f.bools["desktop"], Git: f.str("git", ""), Ref: f.str("ref", ""),
+			Src: f.str("src", ""), Setup: f.str("setup", ""), Dest: f.str("dest", ""), Net: f.bools["net"]}
+		if o.Git != "" && o.Src != "" {
+			return fmt.Errorf("use --git or --src, not both")
+		}
+		if o.Git == "" && o.Src == "" && o.Setup == "" {
+			return fmt.Errorf("nothing to prepare: give --git, --src, or --setup")
+		}
+		if o.Timeout, err = f.dur("timeout", 30*time.Minute); err != nil {
+			return err
+		}
+		if _, err := loadProject(o.Name); err == nil {
+			return fmt.Errorf("project %s exists: `veems project refresh %s` prepares it again, `veems project rm %s` removes it", o.Name, o.Name, o.Name)
+		}
+		_, err = prepare(o)
+		return err
+	case "refresh", "update":
+		if len(args) != 1 {
+			return fmt.Errorf("%s", projectUsage)
+		}
+		pj, err := loadProject(args[0])
+		if err != nil {
+			return err
+		}
+		o, err := pj.prepOpts()
+		if err != nil {
+			return err
+		}
+		if _, err := prepare(o); err != nil {
+			return err
+		}
+		refill(poolKey(pj.Image, pj.Name, false))
+		refill(poolKey(pj.Image, pj.Name, true))
+		return nil
+	case "rm", "remove", "delete":
+		if len(args) != 1 {
+			return fmt.Errorf("%s", projectUsage)
+		}
+		return removeProject(args[0])
+	case "ls", "list":
+		f, err := parse(args, "", "json")
+		if err != nil {
+			return err
+		}
+		ps := listProjects()
+		if f.bools["json"] {
+			if ps == nil {
+				ps = []*Project{}
+			}
+			printJSON(ps)
+			return nil
+		}
+		if len(ps) == 0 {
+			fmt.Fprintln(os.Stderr, "no projects (veems project add NAME linux --git URL --setup 'make deps')")
+			return nil
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "NAME\tIMAGE\tFROM\tDEST\tPREPARED\tSTATUS")
+		for _, pj := range ps {
+			from := pj.Git
+			if pj.Src != "" {
+				from = pj.Src
+			}
+			status := "ready"
+			if why := pj.stale(); why != "" {
+				status = "out of date: " + why
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s ago (%.0fs)\t%s\n", pj.Name, pj.Image, from, pj.Dest,
+				time.Since(pj.Prepared).Round(time.Minute), pj.PrepSecs, status)
+		}
+		return w.Flush()
+	}
+	return fmt.Errorf("%s", projectUsage)
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -24,6 +25,7 @@ type Spec struct {
 	CPUs     int
 	MemMB    int
 	Net      bool     // filtered internet; false = no network at all
+	NetHub   bool     // with Net: reach it through a hub that netdev_del can cut (see prepare)
 	Incoming string   // snapshot state file to restore from
 	CDROMs   []string // build only
 	ROBinds  []string // extra read-only paths the sandbox needs
@@ -71,9 +73,17 @@ func qemuArgs(s Spec) []string {
 	} else {
 		a = append(a, "-device", "virtio-blk-pci,drive=disk0,bootindex=1")
 	}
-	if s.Net {
+	switch {
+	case s.Net && s.NetHub:
+		// The NIC sits on the same hub port as with no network, and the
+		// internet joins the hub through ports that can be removed, which
+		// leaves the device state of a VM with no network.
+		a = append(a, "-netdev", "hubport,id=net0,hubid=0",
+			"-netdev", "user,id=uplink,ipv6=off,net=10.0.2.0/24",
+			"-netdev", "hubport,id=uplinkport,hubid=0,netdev=uplink")
+	case s.Net:
 		a = append(a, "-netdev", "user,id=net0,ipv6=off,net=10.0.2.0/24")
-	} else {
+	default:
 		// A NIC wired to an empty hub: the guest sees a link, nothing is on it.
 		a = append(a, "-netdev", "hubport,id=net0,hubid=0")
 	}
@@ -160,13 +170,29 @@ func launchCmd(s Spec) (*exec.Cmd, error) {
 	return cmd, nil
 }
 
-func qemuVersion() string {
-	out, err := exec.Command(qemuBin, "--version").Output()
+// qemuVersion is cached on disk by the binary's size and mtime: running
+// `qemu --version` costs ~20 ms, and `veems new` asks every time.
+var qemuVersion = sync.OnceValue(func() string {
+	bin, err := exec.LookPath(qemuBin)
 	if err != nil {
 		return ""
 	}
-	return strings.SplitN(string(out), "\n", 2)[0]
-}
+	cache := filepath.Join(cacheDir(), "qemu-version")
+	key := stamp(bin) + " " + bin + "\n"
+	if b, err := os.ReadFile(cache); err == nil && strings.HasPrefix(string(b), key) {
+		return strings.TrimPrefix(string(b), key)
+	}
+	out, err := exec.Command(bin, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	v := strings.SplitN(string(out), "\n", 2)[0]
+	if os.MkdirAll(cacheDir(), 0o755) == nil {
+		os.WriteFile(cache+".tmp", []byte(key+v), 0o644)
+		os.Rename(cache+".tmp", cache)
+	}
+	return v
+})
 
 func qemuImgCreate(path, backing string, sizeGB int) error {
 	args := []string{"create", "-q", "-f", "qcow2", "-o", "cluster_size=65536,lazy_refcounts=on"}
