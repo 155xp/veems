@@ -82,28 +82,34 @@ func prepTarget(m *Meta, dst string) (isDir bool, err error) {
 	return strings.TrimSpace(out) == "dir", err
 }
 
-func openGuest(m *Meta, p, mode string) (int, error) {
+func openGuest(a *agentConn, p, mode string) (int, error) {
 	var h int
-	err := guestCall(m.ID, "guest-file-open", map[string]any{"path": p, "mode": mode}, &h, 30*time.Second)
+	err := a.call("guest-file-open", map[string]any{"path": p, "mode": mode}, &h, 30*time.Second)
 	return h, err
 }
 
-func closeGuest(m *Meta, h int) {
-	guestCall(m.ID, "guest-file-close", map[string]any{"handle": h}, nil, 30*time.Second)
+func closeGuest(a *agentConn, h int) {
+	a.call("guest-file-close", map[string]any{"handle": h}, nil, 30*time.Second)
 }
 
 // writeGuest streams r into a new guest file.
 func writeGuest(m *Meta, dst string, r io.Reader) error {
-	h, err := openGuest(m, dst, "wb")
+	a := guestSession(m.ID)
+	defer a.close()
+	return writeFile(a, dst, r)
+}
+
+func writeFile(a *agentConn, dst string, r io.Reader) error {
+	h, err := openGuest(a, dst, "wb")
 	if err != nil {
 		return err
 	}
-	defer closeGuest(m, h)
+	defer closeGuest(a, h)
 	buf := make([]byte, chunk)
 	for {
 		n, rerr := io.ReadFull(r, buf)
 		if n > 0 {
-			if err := guestCall(m.ID, "guest-file-write", map[string]any{"handle": h,
+			if err := a.call("guest-file-write", map[string]any{"handle": h,
 				"buf-b64": base64.StdEncoding.EncodeToString(buf[:n])}, nil, 120*time.Second); err != nil {
 				return err
 			}
@@ -128,15 +134,17 @@ type fileRead struct {
 var errNotFile = errors.New("not a regular file")
 
 func readGuest(m *Meta, src string, w io.Writer) error {
-	h, err := openGuest(m, src, "rb")
+	a := guestSession(m.ID)
+	defer a.close()
+	h, err := openGuest(a, src, "rb")
 	if err != nil {
 		return fmt.Errorf("%w: %v", errNotFile, err)
 	}
-	defer closeGuest(m, h)
+	defer closeGuest(a, h)
 	first := true
 	for {
 		var fr fileRead
-		if err := guestCall(m.ID, "guest-file-read", map[string]any{"handle": h, "count": readChunk(m)}, &fr, 120*time.Second); err != nil {
+		if err := a.call("guest-file-read", map[string]any{"handle": h, "count": readChunk(m)}, &fr, 120*time.Second); err != nil {
 			if first {
 				return fmt.Errorf("%w: %v", errNotFile, err)
 			}
