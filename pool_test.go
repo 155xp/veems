@@ -256,8 +256,8 @@ func TestDefaultDest(t *testing.T) {
 	}
 }
 
-func TestPrepareNetworkIsDetachable(t *testing.T) {
-	a := strings.Join(qemuArgs(Spec{OS: "linux", Dir: "/d", Disk: "/d/disk", CPUs: 2, MemMB: 1024, Net: true, NetHub: true}), " ")
+func TestNetworkIsDetachable(t *testing.T) {
+	a := strings.Join(qemuArgs(Spec{OS: "linux", Dir: "/d", Disk: "/d/disk", CPUs: 2, MemMB: 1024, Net: true}), " ")
 	// The NIC must sit on the same hub port as a VM with no network, so the
 	// saved device state restores into either kind of VM.
 	off := strings.Join(qemuArgs(Spec{OS: "linux", Dir: "/d", Disk: "/d/disk", CPUs: 2, MemMB: 1024}), " ")

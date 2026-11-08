@@ -31,10 +31,9 @@ type Meta struct {
 	IdleSecs int       `json:"idle_secs"`         // stop after this long with no veems activity; 0 = never
 	PID      int       `json:"pid"`               // supervisor
 	Project  string    `json:"project,omitempty"`
-	Source   string    `json:"source,omitempty"`  // stamp of the snapshot or disk it started from
-	Pool     string    `json:"pool,omitempty"`    // waiting in this pool, not yet claimed
-	Pooled   bool      `json:"-"`                 // this process claimed it from a pool
-	NetHub   bool      `json:"net_hub,omitempty"` // network on a detachable hub (project prep)
+	Source   string    `json:"source,omitempty"` // stamp of the snapshot or disk it started from
+	Pool     string    `json:"pool,omitempty"`   // waiting in this pool, not yet claimed
+	Pooled   bool      `json:"-"`                // this process claimed it from a pool
 }
 
 // Besides its disk, sockets, and logs, a VM's directory holds marker files
@@ -85,7 +84,6 @@ type NewOpts struct {
 	Project string // start from this project's snapshot
 	NoPool  bool   // never claim a pooled VM
 	Pool    string // start a VM for this pool
-	NetHub  bool   // with Net: network that can be unplugged before a snapshot
 }
 
 type snapInfo struct {
@@ -184,7 +182,7 @@ func startVM(src *source, o NewOpts) (*Meta, error) {
 	}
 
 	m := &Meta{ID: newID(p.Prefix), OS: p.OS, Desktop: p.Desktop, CPUs: o.CPUs, MemMB: o.MemMB, Net: o.Net,
-		Snapshot: useSnap, Project: src.project, Pool: o.Pool, NetHub: o.Net && o.NetHub, Source: src.stamp()}
+		Snapshot: useSnap, Project: src.project, Pool: o.Pool, Source: src.stamp()}
 	m.limit(o)
 	dir := vmDir(m.ID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -295,7 +293,7 @@ func supervise(id string) error {
 
 	src := metaSource(m)
 	s := Spec{OS: m.OS, Desktop: m.Desktop, Dir: dir, Disk: filepath.Join(dir, "disk.qcow2"), CPUs: m.CPUs, MemMB: m.MemMB,
-		Net: m.Net, NetHub: m.NetHub, ROBinds: src.binds}
+		Net: m.Net, ROBinds: src.binds}
 	if m.Snapshot {
 		s.Incoming = src.state
 	}

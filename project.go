@@ -228,7 +228,7 @@ func prepare(o PrepOpts) (*Project, error) {
 	start := time.Now()
 
 	// The idle limit only matters if this process dies: every exec counts as activity.
-	m, err := startVM(src, NewOpts{Name: "prep-" + o.Name, Net: pj.Net, NetHub: true, Idle: 20 * time.Minute})
+	m, err := startVM(src, NewOpts{Name: "prep-" + o.Name, Net: pj.Net, Idle: 20 * time.Minute})
 	if err != nil {
 		return nil, err
 	}
