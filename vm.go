@@ -342,6 +342,9 @@ loop:
 		os.WriteFile(filepath.Join(dir, fileExited), nil, 0o600)
 		return nil
 	}
+	if cur, err := loadMeta(id); err == nil {
+		m = cur // it may have been claimed since the last tick
+	}
 	if m.Pool == "" {
 		bury(m, why)
 	}
@@ -381,20 +384,25 @@ func bury(m *Meta, why string) {
 }
 
 // buried says why the VM ref (an id, a prefix of one, or a name) stopped
-// lately, or "".
+// lately, or "". The newest match wins: names and prefixes get reused.
 func buried(ref string) string {
 	if ref == "" {
 		return ""
 	}
+	var found string
+	var newest time.Time
 	ents, _ := os.ReadDir(goneDir())
 	for _, e := range ents {
 		b, err := os.ReadFile(filepath.Join(goneDir(), e.Name()))
-		name, why, _ := strings.Cut(string(b), "\n")
-		if err == nil && (strings.HasPrefix(e.Name(), ref) || name == ref) {
-			return fmt.Sprintf("vm %s is gone: %s", e.Name(), why)
+		info, ierr := e.Info()
+		if err != nil || ierr != nil || !info.ModTime().After(newest) {
+			continue
+		}
+		if name, why, _ := strings.Cut(string(b), "\n"); strings.HasPrefix(e.Name(), ref) || name == ref {
+			found, newest = fmt.Sprintf("vm %s is gone: %s", e.Name(), why), info.ModTime()
 		}
 	}
-	return ""
+	return found
 }
 
 // supervising reports whether m's supervisor is running. The PID alone is

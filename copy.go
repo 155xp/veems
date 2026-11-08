@@ -184,7 +184,7 @@ func pull(m *Meta, src, dst string) error {
 		if err != nil {
 			perm = 0o644
 		}
-		return pullFile(m, src, dst, os.FileMode(perm)&0o755) // never writable by others
+		return pullFile(m, src, dst, os.FileMode(perm)&0o777)
 	}
 	defer guestExec(m, g.remove(tar))
 	pr, pw := io.Pipe()
@@ -194,17 +194,15 @@ func pull(m *Meta, src, dst string) error {
 	return err
 }
 
-// pullFile copies a guest file to dst with mode (without setuid and such).
+// pullFile copies a guest file to dst with mode, less the umask.
 func pullFile(m *Meta, src, dst string, mode os.FileMode) error {
 	tmp := dst + ".veems-partial"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	os.Remove(tmp)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode) // the umask applies
 	if err != nil {
 		return err
 	}
 	err = readGuest(m, src, f)
-	if err == nil {
-		err = f.Chmod(mode)
-	}
 	f.Close()
 	if err != nil {
 		os.Remove(tmp)

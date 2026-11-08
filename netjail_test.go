@@ -1,8 +1,12 @@
 package main
 
 import (
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFirewallBlocksTheHostsNetworks(t *testing.T) {
@@ -23,5 +27,30 @@ func TestFirewallBlocksTheHostsNetworks(t *testing.T) {
 	}
 	if strings.Contains(rules, "default") {
 		t.Errorf("the default route was blocked:\n%s", rules)
+	}
+}
+
+func TestDialQEMURefusesAnythingButASocket(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "s.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if c, err := dialQEMU(sock, time.Second); err != nil {
+		t.Fatalf("real socket: %v", err)
+	} else {
+		c.Close()
+	}
+	link := filepath.Join(dir, "link.sock")
+	os.Symlink(sock, link)
+	if _, err := dialQEMU(link, time.Second); err == nil {
+		t.Error("followed a symlink to a socket")
+	}
+	file := filepath.Join(dir, "file")
+	os.WriteFile(file, nil, 0o600)
+	if _, err := dialQEMU(file, time.Second); err == nil {
+		t.Error("dialed a regular file")
 	}
 }

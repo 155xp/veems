@@ -133,12 +133,22 @@ func readQEMUFile(path string, max int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, max))
 }
 
-// dialQEMU connects to a socket QEMU made, refusing anything else in its place.
+const oPath = 0x200000 // O_PATH, which package syscall leaves out
+
+// dialQEMU connects to a socket QEMU made, refusing anything else in its
+// place. The socket is pinned by an O_PATH descriptor and reached through
+// /proc, so it cannot be swapped for a symlink between the check and connect.
 func dialQEMU(path string, timeout time.Duration) (net.Conn, error) {
-	if st, err := os.Lstat(path); err != nil || st.Mode()&os.ModeSocket == 0 {
+	fd, err := syscall.Open(path, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer syscall.Close(fd)
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFSOCK {
 		return nil, fmt.Errorf("%s: not a socket", path)
 	}
-	return net.DialTimeout("unix", path, timeout)
+	return net.DialTimeout("unix", fmt.Sprintf("/proc/self/fd/%d", fd), timeout)
 }
 
 // checkRegular refuses anything but a regular file where QEMU was to write one.
