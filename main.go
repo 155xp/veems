@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -74,6 +75,12 @@ Desktop (VMs started with --desktop; screenshot works on any VM)
 'exec' exits with the command's exit code, or 124 on timeout.
 `
 
+// exitVeems is how exec and run exit when veems itself fails, so a caller can
+// tell that apart from the command's own exit code (as docker run does).
+const exitVeems = 125
+
+var errUnknownFlag = errors.New("unknown flag")
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Print(usage)
@@ -133,12 +140,28 @@ func run(cmd string, args []string) int {
 		code = 2
 	}
 	if err != nil {
+		if jsonWanted(args) {
+			printJSON(map[string]any{"error": err.Error()})
+		}
 		fmt.Fprintln(os.Stderr, "veems:", err)
 		if code == 0 {
 			code = 1
 		}
 	}
 	return code
+}
+
+// jsonWanted says whether args ask for JSON output, even when they fail to parse.
+func jsonWanted(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			return false
+		}
+		if a == "--json" || a == "-json" {
+			return true
+		}
+	}
+	return false
 }
 
 // flags is a tiny parser that allows flags anywhere before "--".
@@ -184,7 +207,7 @@ func parse(args []string, valued, boolean string) (*flags, error) {
 			}
 			f.vals[name] = append(f.vals[name], val)
 		default:
-			return nil, fmt.Errorf("unknown flag %s", a)
+			return nil, fmt.Errorf("%w %s", errUnknownFlag, a)
 		}
 	}
 	return f, nil
@@ -320,6 +343,13 @@ func execTarget(f *flags, pos []string) (ExecOpts, error) {
 	return o, nil
 }
 
+func commandFlagHint(err error) error {
+	if errors.Is(err, errUnknownFlag) {
+		return fmt.Errorf("%w; flags meant for the command go after --, as in: veems exec VM -- prog -flag", err)
+	}
+	return err
+}
+
 func emit(r *ExecResult, asJSON bool) int {
 	if asJSON {
 		printJSON(map[string]any{"exit_code": r.ExitCode, "stdout": string(r.Stdout), "stderr": string(r.Stderr),
@@ -343,29 +373,29 @@ const execBools = "stdin json gui"
 func cmdExec(args []string) (int, error) {
 	f, err := parse(args, execValued, execBools)
 	if err != nil {
-		return 2, err
+		return exitVeems, commandFlagHint(err)
 	}
 	if len(f.pos) < 1 {
-		return 2, fmt.Errorf("usage: veems exec <vm> ('line' | -- prog args...)")
+		return exitVeems, fmt.Errorf("usage: veems exec <vm> ('line' | -- prog args...)")
 	}
 	id, err := resolve(f.pos[0])
 	if err != nil {
-		return 1, err
+		return exitVeems, err
 	}
 	m, err := loadMeta(id)
 	if err != nil {
-		return 1, err
+		return exitVeems, err
 	}
 	o, err := execTarget(f, f.pos[1:])
 	if err != nil {
-		return 2, err
+		return exitVeems, err
 	}
 	if f.bools["gui"] {
 		return 0, launchGUI(m, o)
 	}
 	r, err := guestExec(m, o)
 	if err != nil {
-		return 1, err
+		return exitVeems, err
 	}
 	return emit(r, f.bools["json"]), nil
 }
@@ -411,7 +441,7 @@ func cmdCp(args []string) error {
 func cmdRun(args []string) (int, error) {
 	f, err := parse(args, newValued+" "+execValued+" push pull", newBools+" "+execBools+" keep")
 	if err != nil {
-		return 2, err
+		return exitVeems, commandFlagHint(err)
 	}
 	// With --project the os is optional, so the first word may be the command.
 	pos, osName := f.pos, ""
@@ -421,19 +451,19 @@ func cmdRun(args []string) (int, error) {
 		}
 	}
 	if osName == "" && f.str("project", "") == "" {
-		return 2, fmt.Errorf("usage: veems run <linux|windows> [flags] ('line' | -- prog args...)")
+		return exitVeems, fmt.Errorf("usage: veems run <linux|windows> [flags] ('line' | -- prog args...)")
 	}
 	no, err := newOpts(f, osName)
 	if err != nil {
-		return 2, err
+		return exitVeems, err
 	}
 	eo, err := execTarget(f, pos)
 	if err != nil {
-		return 2, err
+		return exitVeems, err
 	}
 	m, err := newVM(no)
 	if err != nil {
-		return 1, err
+		return exitVeems, err
 	}
 	if f.bools["keep"] {
 		fmt.Fprintln(os.Stderr, "veems: vm", m.ID, "kept running")
@@ -444,23 +474,30 @@ func cmdRun(args []string) (int, error) {
 	for _, spec := range f.vals["push"] {
 		local, remote, _ := strings.Cut(spec, ":")
 		if err := push(m, local, remote); err != nil {
-			return 1, fmt.Errorf("push %s: %w", spec, err)
+			return exitVeems, fmt.Errorf("push %s: %w", spec, err)
 		}
 	}
 	r, err := guestExec(m, eo)
 	if err != nil {
-		return 1, err
+		return exitVeems, err
 	}
+	var pullErr error
 	for _, spec := range f.vals["pull"] {
 		remote, local, ok := cutLast(spec)
 		if !ok {
-			return 1, fmt.Errorf("--pull wants REMOTE:LOCAL, got %q", spec)
+			pullErr = fmt.Errorf("--pull wants REMOTE:LOCAL, got %q", spec)
+		} else if err := pull(m, remote, local); err != nil {
+			pullErr = fmt.Errorf("pull %s: %w", spec, err)
 		}
-		if err := pull(m, remote, local); err != nil {
-			fmt.Fprintf(os.Stderr, "veems: pull %s: %v\n", spec, err)
+		if pullErr != nil {
+			fmt.Fprintln(os.Stderr, "veems:", pullErr)
 		}
 	}
-	return emit(r, f.bools["json"]), nil
+	code := emit(r, f.bools["json"])
+	if pullErr != nil && code == 0 {
+		code = exitVeems
+	}
+	return code, nil
 }
 
 // cutLast splits REMOTE:LOCAL at the last colon so Windows paths (C:\x) survive.
@@ -640,7 +677,7 @@ func cmdPointer(cmd string, args []string) error {
 	}
 	usage := map[string]string{
 		"click": "click <vm> X Y [--right] [--double]", "move": "move <vm> X Y",
-		"drag": "drag <vm> X1 Y1 X2 Y2", "scroll": "scroll <vm> up|down|left|right [N] [--at X Y]",
+		"drag": "drag <vm> X1 Y1 X2 Y2", "scroll": "scroll <vm> up|down|left|right [N]",
 	}[cmd]
 	m, rest, err := vmArg(f.pos, usage)
 	if err != nil {
@@ -766,7 +803,7 @@ func cmdDoctor() error {
 	}
 	check("/dev/kvm usable", err, "enable virtualization in firmware; add yourself to the kvm group")
 	for _, b := range []struct{ bin, pkg string }{{qemuBin, "qemu-system-x86"}, {"qemu-img", "qemu-utils"},
-		{"bwrap", "bubblewrap"}, {"pasta", "passt"}, {"xorriso", "xorriso"}} {
+		{"bwrap", "bubblewrap"}, {"pasta", "passt"}, {"ip", "iproute2"}, {"xorriso", "xorriso"}} {
 		_, err := exec.LookPath(b.bin)
 		check(b.bin, err, "apt install "+b.pkg)
 	}

@@ -231,9 +231,23 @@ func lend(cl, qga net.Conn) bool {
 			}
 		}
 	}()
-	_, err := io.Copy(qga, cl)
-	var werr *net.OpError
-	writeFailed := errors.As(err, &werr) && werr.Op == "write"
+	// A guest that stops reading must not wedge the proxy for good: no call
+	// waits longer than this for one write.
+	writeFailed := false
+	buf := make([]byte, 64<<10)
+	for {
+		n, err := cl.Read(buf)
+		if n > 0 {
+			qga.SetWriteDeadline(time.Now().Add(2 * time.Minute))
+			if _, werr := qga.Write(buf[:n]); werr != nil {
+				writeFailed = true
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
 	qga.SetReadDeadline(time.Now()) // stop the reader, keep the connection
 	rerr := <-back
 	qga.SetReadDeadline(time.Time{})
