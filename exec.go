@@ -108,7 +108,7 @@ func guestExec(m *Meta, o ExecOpts) (*ExecResult, error) {
 	}
 	defer onInterrupt(func() {
 		k := guestSession(m.ID)
-		k.run(m.guest().killTree(pid), 3*time.Second)
+		k.start(m.guest().killTree(pid), false) // the process is exiting: no waiting for it
 		k.close()
 	})()
 	var deadline time.Time
