@@ -117,8 +117,7 @@ func sweepAbandoned(say func(string, ...any)) {
 	}
 }
 
-func claim(o NewOpts, src *source) *Meta {
-	key := poolKey(src.prof.Key, src.project, o.Net)
+func claim(o NewOpts, src *source, key string) *Meta {
 	want := src.stamp()
 	for _, m := range pooled(key) {
 		if (o.CPUs != 0 && o.CPUs != m.CPUs) || (o.MemMB != 0 && o.MemMB != m.MemMB) {

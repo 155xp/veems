@@ -15,37 +15,41 @@ const linuxPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 func (linuxGuest) workDir() string { return "/work" }
 
 // execWrapper runs a command in its own session with its output going to
-// files, waits for that command only, then prints the files. Output through
-// the agent's pipes would only end once every process holding them exits, so
-// a job the command leaves running (`server &`) would hang the exec until it
-// timed out. The session lets a timeout kill everything the command started.
-const execWrapper = `cd -- "$1" || exit 125
+// files, then prints the files. The agent's own pipes would only close once
+// every process holding them exited, so a job the command leaves running
+// (`server &`) would hang the exec until it timed out; the shell instead
+// waits for the command alone. Tools go by full path because o.Env may set
+// PATH. killTree relies on the layout: the command is the wrapper's child
+// and leads its own session.
+var execWrapper = fmt.Sprintf(`cd -- "$1" || exit %[1]d
 shift
-o=/tmp/.veems-$$.out e=/tmp/.veems-$$.err
-exec 3<&0
-setsid "$@" <&3 3<&- >"$o" 2>"$e" &
-wait $! 2>/dev/null
+o=/var/tmp/.veems-$$.out e=/var/tmp/.veems-$$.err
+: >"$o" && : >"$e" || exit %[1]d
+/usr/bin/setsid -w "$@" >"$o" 2>"$e"
 c=$?
-cat "$o"
-cat "$e" >&2
-rm -f "$o" "$e"
-exit $c`
+/bin/cat "$o"
+/bin/cat "$e" >&2
+/bin/rm -f "$o" "$e"
+exit $c`, exitVeems)
+
+// argv is the program and arguments o runs; a shell line goes to bash with
+// shellFlags.
+func argv(o ExecOpts, shellFlags string) []string {
+	if o.Line != "" {
+		return []string{"/bin/bash", shellFlags, o.Line}
+	}
+	return o.Argv
+}
 
 func (g linuxGuest) proc(_ *agentConn, o ExecOpts) (guestProc, error) {
 	env := []string{"HOME=/root", "USER=root", "PATH=" + linuxPath, "LANG=C.UTF-8", "TERM=dumb"}
 	if g.desktop { // so xdotool, wmctrl, and friends reach the desktop
 		env = append(env, "DISPLAY=:0", "XAUTHORITY=/home/agent/.Xauthority")
 	}
-	cmd := o.Argv
-	if o.Line != "" {
-		cmd = []string{"/bin/bash", "-c", o.Line}
-	}
 	return guestProc{Path: "/bin/sh", Env: append(env, o.Env...),
-		Args: append([]string{"-c", execWrapper, "veems", cwdOf(g, o)}, cmd...)}, nil
+		Args: append([]string{"-c", execWrapper, "veems", cwdOf(g, o)}, argv(o, "-c")...)}, nil
 }
 
-// killTree kills the session of every child of pid: with execWrapper, that
-// is the command and everything it started.
 func (linuxGuest) killTree(pid int) guestProc {
 	return guestProc{Path: "/bin/sh", Args: []string{"-c",
 		`for c in $(pgrep -P "$1"); do pkill -9 -s "$c"; kill -9 "$c"; done`, "veems", fmt.Sprint(pid)}}
@@ -75,7 +79,7 @@ func (linuxGuest) prepTarget(dst, name string, mode os.FileMode) ExecOpts {
 
 func (linuxGuest) packIfDir(src, tar string) ExecOpts {
 	return sh(`if [ -d "$1" ]; then tar -cf "$2" -C "$1" . && echo dir
-elif [ -f "$1" ]; then echo file
+elif [ -f "$1" ]; then echo "file $(stat -c %a -- "$1")"
 elif [ -e "$1" ]; then echo "not a regular file or directory: $1" >&2; exit 2
 else echo "no such file or directory: $1" >&2; exit 2; fi`, src, tar)
 }
@@ -93,16 +97,14 @@ git init -q "$3"; cd "$3"; git remote add origin "$1"
 git fetch -q --depth 1 origin "$2"; git checkout -q FETCH_HEAD`, url, ref, dest)
 }
 
+// gui starts o as the desktop user, in a login shell for a shell line so
+// it gets that user's desktop environment.
 func (g linuxGuest) gui(o ExecOpts) ExecOpts {
-	cmd := o.Argv
-	if o.Line != "" {
-		cmd = []string{"/bin/bash", "-lc", o.Line}
-	}
-	r := sh(`cd -- "$1" || exit 125; shift
-u=$(id -u agent)
-setsid -f runuser -u agent -- env DISPLAY=:0 XAUTHORITY=/home/agent/.Xauthority HOME=/home/agent USER=agent \
-  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$u/bus XDG_RUNTIME_DIR=/run/user/$u "$@" >/dev/null 2>&1 </dev/null`,
-		append([]string{cwdOf(g, o)}, cmd...)...)
+	r := sh(fmt.Sprintf(`cd -- "$1" || exit %d; shift
+u=$(/usr/bin/id -u agent)
+/usr/bin/setsid -f /usr/sbin/runuser -u agent -- /usr/bin/env DISPLAY=:0 XAUTHORITY=/home/agent/.Xauthority HOME=/home/agent USER=agent \
+  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$u/bus XDG_RUNTIME_DIR=/run/user/$u "$@" >/dev/null 2>&1 </dev/null`, exitVeems),
+		append([]string{cwdOf(g, o)}, argv(o, "-lc")...)...)
 	r.Env = o.Env
 	return r
 }

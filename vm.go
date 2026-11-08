@@ -102,9 +102,10 @@ func newVM(o NewOpts) (*Meta, error) {
 			}
 		}
 	}
-	defer refill(poolKey(src.prof.Key, src.project, o.Net))
+	key := poolKey(src.prof.Key, src.project, o.Net)
+	defer refill(key)
 	if !o.Cold && !o.NoPool {
-		if m := claim(o, src); m != nil {
+		if m := claim(o, src, key); m != nil {
 			return m, nil
 		}
 	}
@@ -281,6 +282,9 @@ func supervise(id string) error {
 		s.Incoming = src.state
 	}
 	cmd, err := launchCmd(s)
+	if err == nil && m.Snapshot && stamp(src.state) != m.Source {
+		err = fmt.Errorf("the snapshot changed while this vm was starting; try again")
+	}
 	if err != nil {
 		os.WriteFile(filepath.Join(dir, "qemu.log"), []byte(err.Error()), 0o600)
 		os.WriteFile(filepath.Join(dir, fileExited), nil, 0o600)
@@ -318,7 +322,7 @@ loop:
 			}
 			break loop
 		case <-sig:
-			why = "it was removed with veems rm"
+			why = "it was deleted (veems rm, or the end of veems run)"
 			stop()
 			break loop
 		case <-tick.C:
@@ -339,7 +343,7 @@ loop:
 		return nil
 	}
 	if m.Pool == "" {
-		bury(id, why)
+		bury(m, why)
 	}
 	return os.RemoveAll(dir)
 }
@@ -365,7 +369,7 @@ func goneDir() string { return filepath.Join(vmsDir(), ".gone") }
 
 // bury notes why a VM stopped, so commands that still name it can say so
 // instead of "no such vm". Notes older than an hour are cleared away.
-func bury(id, why string) {
+func bury(m *Meta, why string) {
 	os.MkdirAll(goneDir(), 0o700)
 	ents, _ := os.ReadDir(goneDir())
 	for _, e := range ents {
@@ -373,7 +377,24 @@ func bury(id, why string) {
 			os.Remove(filepath.Join(goneDir(), e.Name()))
 		}
 	}
-	os.WriteFile(filepath.Join(goneDir(), id), []byte(why), 0o600)
+	os.WriteFile(filepath.Join(goneDir(), m.ID), []byte(m.Name+"\n"+why), 0o600)
+}
+
+// buried says why the VM ref (an id, a prefix of one, or a name) stopped
+// lately, or "".
+func buried(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	ents, _ := os.ReadDir(goneDir())
+	for _, e := range ents {
+		b, err := os.ReadFile(filepath.Join(goneDir(), e.Name()))
+		name, why, _ := strings.Cut(string(b), "\n")
+		if err == nil && (strings.HasPrefix(e.Name(), ref) || name == ref) {
+			return fmt.Sprintf("vm %s is gone: %s", e.Name(), why)
+		}
+	}
+	return ""
 }
 
 // supervising reports whether m's supervisor is running. The PID alone is
@@ -453,8 +474,8 @@ func resolve(ref string) (string, error) {
 	case 1:
 		return hits[0], nil
 	case 0:
-		if why, err := os.ReadFile(filepath.Join(goneDir(), filepath.Base(ref))); err == nil {
-			return "", fmt.Errorf("vm %s is gone: %s", ref, why)
+		if gone := buried(ref); gone != "" {
+			return "", errors.New(gone)
 		}
 		return "", fmt.Errorf("no such vm: %s", ref)
 	}

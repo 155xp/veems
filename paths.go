@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,14 +119,26 @@ func lockFile(path string, wait bool) (*os.File, error) {
 	return f, nil
 }
 
-// readNoFollow reads a file QEMU wrote, refusing a symlink in its place.
-func readNoFollow(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+// readQEMUFile reads a file QEMU wrote. A compromised QEMU could have put a
+// symlink, a FIFO, or a huge file in its place.
+func readQEMUFile(path string, max int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(f)
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() || st.Size() > max {
+		return nil, fmt.Errorf("%s: not a regular file of at most %d bytes", path, max)
+	}
+	return io.ReadAll(io.LimitReader(f, max))
+}
+
+// dialQEMU connects to a socket QEMU made, refusing anything else in its place.
+func dialQEMU(path string, timeout time.Duration) (net.Conn, error) {
+	if st, err := os.Lstat(path); err != nil || st.Mode()&os.ModeSocket == 0 {
+		return nil, fmt.Errorf("%s: not a socket", path)
+	}
+	return net.DialTimeout("unix", path, timeout)
 }
 
 // checkRegular refuses anything but a regular file where QEMU was to write one.

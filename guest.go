@@ -25,7 +25,7 @@ type guestOS interface {
 	// prepTarget creates the file a copy of name to dst writes (inside dst
 	// if that is a directory) with mode, and prints its path.
 	prepTarget(dst, name string, mode os.FileMode) ExecOpts
-	packIfDir(src, tar string) ExecOpts // prints "dir" after tarring src into tar, or "file"; fails if src is missing
+	packIfDir(src, tar string) ExecOpts // prints "dir" after tarring src into tar, or "file" and maybe its octal mode; fails if src is missing
 	unpack(tar, dst string) ExecOpts
 	remove(p string) ExecOpts
 	gitClone(url, ref, dest string) ExecOpts
