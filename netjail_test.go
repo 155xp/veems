@@ -44,12 +44,16 @@ func TestDialQEMURefusesAnythingButASocket(t *testing.T) {
 		c.Close()
 	}
 	link := filepath.Join(dir, "link.sock")
-	os.Symlink(sock, link)
+	if err := os.Symlink(sock, link); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := dialQEMU(link, time.Second); err == nil {
 		t.Error("followed a symlink to a socket")
 	}
 	file := filepath.Join(dir, "file")
-	os.WriteFile(file, nil, 0o600)
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := dialQEMU(file, time.Second); err == nil {
 		t.Error("dialed a regular file")
 	}

@@ -133,7 +133,7 @@ func readQEMUFile(path string, max int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, max))
 }
 
-const oPath = 0x200000 // O_PATH, which package syscall leaves out
+const oPath = 0x200000 // O_PATH on x86-64 (all veems runs on); package syscall leaves it out
 
 // dialQEMU connects to a socket QEMU made, refusing anything else in its
 // place. The socket is pinned by an O_PATH descriptor and reached through
@@ -141,14 +141,18 @@ const oPath = 0x200000 // O_PATH, which package syscall leaves out
 func dialQEMU(path string, timeout time.Duration) (net.Conn, error) {
 	fd, err := syscall.Open(path, oPath|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	defer syscall.Close(fd)
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFSOCK {
 		return nil, fmt.Errorf("%s: not a socket", path)
 	}
-	return net.DialTimeout("unix", fmt.Sprintf("/proc/self/fd/%d", fd), timeout)
+	c, err := net.DialTimeout("unix", fmt.Sprintf("/proc/self/fd/%d", fd), timeout)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return c, nil
 }
 
 // checkRegular refuses anything but a regular file where QEMU was to write one.
