@@ -198,7 +198,6 @@ func prepare(o PrepOpts) (*Project, error) {
 		return nil, err
 	}
 
-	// Assemble the new project next to the old one, then swap it in.
 	work, err := os.MkdirTemp(projectsDir(), "."+o.Name+"-")
 	if err != nil {
 		return nil, err

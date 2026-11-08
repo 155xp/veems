@@ -22,7 +22,6 @@ import (
 // its directory. Removing the marker is the claim: unlink succeeds for exactly
 // one process.
 
-// PoolTarget is one pool: how many VMs of one kind to keep ready.
 type PoolTarget struct {
 	Image   string `json:"image"` // profile key, e.g. linux
 	Project string `json:"project,omitempty"`
@@ -86,7 +85,6 @@ func pooled(key string) []*Meta {
 // take claims a waiting VM so no one else can. False if someone was faster.
 func take(m *Meta) bool { return os.Remove(filepath.Join(vmDir(m.ID), filePooled)) == nil }
 
-// claim hands out a waiting VM that matches o and src, or nil.
 func claim(o NewOpts, src *source) *Meta {
 	key := poolKey(src.prof.Key, src.project, o.Net)
 	want := src.stamp()
@@ -95,7 +93,7 @@ func claim(o NewOpts, src *source) *Meta {
 			continue
 		}
 		if m.Source != want {
-			destroy(m.ID) // made from an older image or project
+			destroy(m.ID)
 			continue
 		}
 		m.Pool = ""
@@ -116,7 +114,6 @@ func claim(o NewOpts, src *source) *Meta {
 	return nil
 }
 
-// refill starts a background `veems _pool-fill` if key has a pool.
 func refill(key string) {
 	if _, ok := poolTarget(key); !ok {
 		return
@@ -157,7 +154,6 @@ func fillPools(verbose bool) error {
 	for _, t := range loadPools() {
 		targets[t.key()] = t
 	}
-	// Remove what no pool wants any more.
 	have := map[string][]*Meta{}
 	for _, m := range pooled("") {
 		t, ok := targets[m.Pool]
@@ -221,8 +217,6 @@ func fillPools(verbose bool) error {
 	return firstErr
 }
 
-// freshenProject re-prepares a project whose image snapshot changed, from its
-// recorded recipe.
 func freshenProject(name string, say func(string, ...any)) error {
 	pj, err := loadProject(name)
 	if err != nil {
@@ -258,7 +252,6 @@ func sortedKeys(m map[string]PoolTarget) []string {
 	return ks
 }
 
-// lockPools serializes pool changes and fills across processes.
 func lockPools() (unlock func(), err error) {
 	os.MkdirAll(veemsHome(), 0o755)
 	lock, err := lockFile(filepath.Join(veemsHome(), "pool.lock"), true)
@@ -268,7 +261,6 @@ func lockPools() (unlock func(), err error) {
 	return func() { lock.Close() }, nil
 }
 
-// setPool changes one pool's size (0 removes it) and fills or drains it now.
 func setPool(t PoolTarget) error {
 	unlock, err := lockPools()
 	if err != nil {

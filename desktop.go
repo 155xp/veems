@@ -10,7 +10,6 @@ import (
 	"time"
 )
 
-// screenshot saves the VM's screen as PNG and returns its width and height.
 func screenshot(id string) (png []byte, w, h int, err error) {
 	dir := vmDir(id)
 	tmp := filepath.Join(dir, fmt.Sprintf("screen-%d.png", time.Now().UnixNano()))
@@ -203,7 +202,6 @@ func typeText(m *Meta, text string) error {
 	return nil
 }
 
-// pressKeys presses combos like "ctrl+l", "alt+f4", "enter" in order.
 func pressKeys(m *Meta, combos []string) error {
 	q, err := dialQMP(vmDir(m.ID), 10*time.Second)
 	if err != nil {
@@ -247,7 +245,6 @@ func pressKeys(m *Meta, combos []string) error {
 	return nil
 }
 
-// launchGUI starts a program on the VM's desktop and returns at once.
 func launchGUI(m *Meta, o ExecOpts) error {
 	if err := needDesktop(m); err != nil {
 		return err

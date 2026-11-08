@@ -32,7 +32,6 @@ var profiles = map[string]*Profile{
 	"windows-desktop": {Key: "windows-desktop", OS: "windows", Desktop: true, Prefix: "wind", CPUs: 2, MemMB: 4096, DiskGB: 48, Boot: 15 * time.Minute, Settle: 3 * time.Minute},
 }
 
-// profile resolves an OS name, plus --desktop, to an image variant.
 func profile(name string, desktop bool) (*Profile, error) {
 	name, d := strings.CutSuffix(name, "-desktop")
 	switch name {
@@ -51,7 +50,6 @@ func profile(name string, desktop bool) (*Profile, error) {
 	return p, nil
 }
 
-// buildCmd is the command that builds this image.
 func (p *Profile) buildCmd() string {
 	if p.Desktop {
 		return "veems build " + p.OS + " --desktop"
@@ -80,7 +78,6 @@ func vmsDir() string             { return filepath.Join(veemsHome(), "vms") }
 func imageDir(key string) string { return filepath.Join(veemsHome(), "images", key) }
 func vmDir(id string) string     { return filepath.Join(vmsDir(), id) }
 
-// Image files for one variant.
 func basePath(key string) string  { return filepath.Join(imageDir(key), "base.qcow2") }
 func tmplDisk(key string) string  { return filepath.Join(imageDir(key), "snap.qcow2") }
 func tmplState(key string) string { return filepath.Join(imageDir(key), "snap.state") }

@@ -59,7 +59,6 @@ func download(url, name string) (string, error) {
 	return dst, os.Rename(dst+".part", dst)
 }
 
-// makeISO packs files into a small ISO9660 image with the given volume label.
 func makeISO(out, label string, files map[string][]byte) error {
 	dir, err := os.MkdirTemp(filepath.Dir(out), "iso-")
 	if err != nil {
@@ -78,7 +77,6 @@ func makeISO(out, label string, files map[string][]byte) error {
 	return nil
 }
 
-// runToPoweroff boots a build VM and waits until the guest powers itself off.
 func runToPoweroff(s Spec, limit time.Duration) error {
 	cmd, err := launchCmd(s)
 	if err != nil {
@@ -235,7 +233,6 @@ func buildWindows(p *Profile, o BuildOpts) error {
 	return installBase(p, work, disk)
 }
 
-// installBase compacts the finished build disk into the read-only base image.
 func installBase(p *Profile, work, disk string) error {
 	logf("compacting base image")
 	base := basePath(p.Key)

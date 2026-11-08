@@ -167,7 +167,6 @@ func writeTar(w io.Writer, root string) error {
 	return tw.Close()
 }
 
-// pull copies a guest file or directory to the host.
 func pull(m *Meta, src, dst string) error {
 	g := m.guest()
 	src = g.abs(src)
@@ -219,7 +218,6 @@ func safeUntar(r io.Reader, dst string) error {
 	inside := func(p string) bool {
 		return p == dst || strings.HasPrefix(p, dst+string(os.PathSeparator))
 	}
-	// noLinksBetween checks that no existing component between dst and p is a symlink.
 	noLinksBetween := func(p string) error {
 		rel, _ := filepath.Rel(dst, filepath.Dir(p))
 		cur := dst
@@ -285,7 +283,6 @@ func safeUntar(r io.Reader, dst string) error {
 				return err
 			}
 		default:
-			// Hard links, devices, fifos: skipped.
 		}
 	}
 }

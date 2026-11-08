@@ -64,7 +64,6 @@ func (s *source) cold() *source {
 	return &c
 }
 
-// sourceFor finds what o asks to start from.
 func sourceFor(o NewOpts) (*source, error) {
 	if o.Project != "" {
 		s, err := projectSource(o.Project)
@@ -88,7 +87,6 @@ func sourceFor(o NewOpts) (*source, error) {
 	return imageSource(p), nil
 }
 
-// metaSource is the source a running VM was created from.
 func metaSource(m *Meta) *source {
 	p := metaProfile(m)
 	if m.Project != "" {
@@ -115,10 +113,8 @@ func readSnap(key string) *snapInfo {
 	return &s
 }
 
-// current says whether this QEMU can restore the snapshot.
 func (s *snapInfo) current() bool { return s != nil && s.QEMU == qemuVersion() }
 
-// fits says whether a VM with cpus and memMB can restore the snapshot.
 func (s *snapInfo) fits(cpus, memMB int) bool {
 	return s.current() && s.CPUs == cpus && s.MemMB == memMB
 }
