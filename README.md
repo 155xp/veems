@@ -155,8 +155,8 @@ Windows from asking to a finished `Get-Date` went from 2.2 s to 1.7 s.
 ## How it stays safe
 
 1. **Hardware virtualization.** Each VM has its own kernel and memory.
-2. **A minimal, sandboxed QEMU.** No USB passthrough, sound, or shared folders. QEMU runs with seccomp inside a bubblewrap jail that can't see your home folder.
-3. **No network by default.** With `--net`, a firewall lets the VM reach the internet but blocks your computer, your LAN, and cloud metadata addresses.
+2. **A minimal, sandboxed QEMU.** No USB passthrough, sound, or shared folders. QEMU runs with seccomp inside a bubblewrap jail that sees only its disk and its sockets, not your home folder or the files veems keeps about the VM.
+3. **No network by default.** With `--net`, a firewall lets the VM reach the internet but blocks your computer, your LAN, and cloud metadata addresses. If veems can't read your machine's networks to build that firewall, the VM doesn't start. The firewall is built from the routes the host has when the VM starts; networks behind a VPN that uses public addresses aren't covered.
 4. **Throwaway disks.** Each VM writes to its own copy-on-write layer over a read-only image. Closing the VM deletes the layer.
 5. **Careful file copies.** Files only move through `veems cp`, and anything copied out is checked so it can't land outside the folder you chose.
 6. **Resource limits.** VMs run at low priority, return freed memory to the host, and won't start if your machine is low on RAM.
@@ -172,7 +172,7 @@ agent, paste the output of `veems skill show` into its instructions.
 - Images live in `~/.local/share/veems` (Linux ~1.6 GB, Windows ~5 GB). Running VMs add only the space their own changes take, and give it back when they close.
 - The Windows image is Microsoft's free 180-day evaluation. Rebuild it when it expires.
 - After upgrading QEMU, run `veems build <os> --snapshot` to refresh the saved snapshot (and `veems project refresh` your projects). Snapshots saved by veems 0.1 still work; re-saving one with 0.2 takes ~70 ms off every restore.
-- Projects live in `~/.local/share/veems/projects`; each is a few hundred MB (its RAM state plus the disk changes setup made).
+- Projects live in `~/.local/share/veems/projects`; each is a few hundred MB (its RAM state plus the disk changes setup made). Only you can read them, since the checkout and the saved RAM may hold private code or credentials.
 - `veems doctor` checks that everything is set up.
 
 ## License

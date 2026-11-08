@@ -71,8 +71,10 @@ Desktop (VMs started with --desktop; screenshot works on any VM)
   view <vm> [--port N] [--no-open]   live, clickable view in your browser
   X Y are pixels from the top-left of the screenshot.
 
-<vm> is an id like lnx-k3m9qa, a unique prefix of one, or a --name.
-'exec' exits with the command's exit code, or 124 on timeout.
+<vm> is an id like lnx-k3m9qa, a unique prefix of one, or a --name (names
+are unique among running VMs).
+'exec' and 'run' exit with the command's exit code, 124 on timeout, or 125
+if veems itself failed (with --json, that prints {"error": ...}).
 `
 
 // exitVeems is how exec and run exit when veems itself fails, so a caller can
