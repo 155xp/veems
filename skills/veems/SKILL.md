@@ -98,13 +98,16 @@ check things from the shell too. The user can watch with `veems view $VM`.
 
 ## Details that matter
 
-- `veems exec` exits with the command's exit code; stdout and stderr stay separate. `--json` gives `{exit_code, stdout, stderr}`.
-- Default timeout per exec is 10 min (`--timeout 30m`, `--timeout 0` for none). Timeout exits 124 and kills the process tree.
+- `veems exec` exits with the command's exit code; stdout and stderr stay separate. `--json` gives `{exit_code, stdout, stderr}`. Exit code 125 means veems itself failed (the VM is gone, a bad flag), not your command.
+- Flags after the VM id belong to veems: `veems exec $VM python3 -V` fails; write `veems exec $VM -- python3 -V`.
+- Default timeout per exec is 10 min (`--timeout 30m`, `--timeout 0` for none). A timeout exits 124, kills everything the command started, and still prints the output so far.
 - Output is returned when the command finishes (no live streaming). For long jobs, write to a log file and `veems cp` it out, or poll with `veems exec $VM 'tail -n 20 /work/log'`.
+- Background jobs are fine on Linux: `veems exec $VM 'python3 -m http.server 8000 >/tmp/http.log 2>&1 &'` returns at once and the server keeps running for later commands. Its output is not returned, so send it to a file.
 - Commands run as root (Linux) / SYSTEM (Windows). Default working dir: `/work` or `C:\work`. Use `--cwd DIR`, `--env K=V`, `--stdin` (pipes your stdin in).
 - Relative or empty paths in `cp` are under the work dir: `$VM:` means `/work`. A trailing `/` on the destination puts the file inside that dir.
 - Windows shell lines are PowerShell: `veems exec $VM 'Get-ChildItem; .\app.exe --help'`. For cmd syntax: `veems exec $VM -- cmd /c "dir /b"`.
-- `veems ls` lists running VMs and when each will stop (pooled VMs that are still waiting are not listed; `veems rm --all` leaves them alone). Ids accept a unique prefix, or use `--name` on `new`.
+- `veems ls` lists running VMs and when each will stop (pooled VMs that are still waiting are not listed; `veems rm --all` leaves them alone). Ids accept a unique prefix, or use `--name` on `new` (one running VM per name).
+- If a command says `vm ... is gone: <reason>`, the VM stopped (idle or TTL limit, shutdown, or `veems rm`); start a new one.
 - Each VM is independent; several agents can run many VMs at once, and several commands can hit one VM at once.
 
 ## Cleanup (automatic, but do it yourself)
