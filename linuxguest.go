@@ -13,6 +13,23 @@ const linuxPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 func (linuxGuest) workDir() string { return "/work" }
 
+// execWrapper runs a command in its own session with its output going to
+// files, waits for that command only, then prints the files. Output through
+// the agent's pipes would only end once every process holding them exits, so
+// a job the command leaves running (`server &`) would hang the exec until it
+// timed out. The session lets a timeout kill everything the command started.
+const execWrapper = `cd -- "$1" || exit 125
+shift
+o=/tmp/.veems-$$.out e=/tmp/.veems-$$.err
+exec 3<&0
+setsid "$@" <&3 3<&- >"$o" 2>"$e" &
+wait $! 2>/dev/null
+c=$?
+cat "$o"
+cat "$e" >&2
+rm -f "$o" "$e"
+exit $c`
+
 func (g linuxGuest) proc(_ *agentConn, o ExecOpts) (guestProc, error) {
 	env := []string{"HOME=/root", "USER=root", "PATH=" + linuxPath, "LANG=C.UTF-8", "TERM=dumb"}
 	if g.desktop { // so xdotool, wmctrl, and friends reach the desktop
@@ -23,12 +40,14 @@ func (g linuxGuest) proc(_ *agentConn, o ExecOpts) (guestProc, error) {
 		cmd = []string{"/bin/bash", "-c", o.Line}
 	}
 	return guestProc{Path: "/bin/sh", Env: append(env, o.Env...),
-		Args: append([]string{"-c", `cd -- "$1" || exit 125; shift; exec "$@"`, "veems", cwdOf(g, o)}, cmd...)}, nil
+		Args: append([]string{"-c", execWrapper, "veems", cwdOf(g, o)}, cmd...)}, nil
 }
 
+// killTree kills the session of every child of pid: with execWrapper, that
+// is the command and everything it started.
 func (linuxGuest) killTree(pid int) guestProc {
 	return guestProc{Path: "/bin/sh", Args: []string{"-c",
-		`kt(){ for c in $(pgrep -P "$1"); do kt "$c"; done; kill -9 "$1"; }; kt "$1"`, "veems", fmt.Sprint(pid)}}
+		`for c in $(pgrep -P "$1"); do pkill -9 -s "$c"; kill -9 "$c"; done`, "veems", fmt.Sprint(pid)}}
 }
 
 func (g linuxGuest) abs(p string) string {

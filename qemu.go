@@ -261,18 +261,42 @@ func running(pid string) bool {
 	return !strings.HasPrefix(after, "Z")
 }
 
-// onInterrupt runs cleanup and exits if this process is interrupted or told
-// to stop before the returned cancel is called.
+var interrupts struct {
+	sync.Mutex
+	once     sync.Once
+	cleanups []*func()
+}
+
+// onInterrupt runs cleanup if this process is interrupted or told to stop
+// before the returned cancel is called. Cleanups run newest first, then the
+// process exits.
 func onInterrupt(cleanup func()) (cancel func()) {
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	go func() {
-		if _, ok := <-ch; ok {
-			cleanup()
+	interrupts.once.Do(func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		go func() {
+			<-ch
+			interrupts.Lock()
+			for i := len(interrupts.cleanups) - 1; i >= 0; i-- {
+				(*interrupts.cleanups[i])()
+			}
 			os.Exit(130)
+		}()
+	})
+	interrupts.Lock()
+	defer interrupts.Unlock()
+	p := &cleanup
+	interrupts.cleanups = append(interrupts.cleanups, p)
+	return func() {
+		interrupts.Lock()
+		defer interrupts.Unlock()
+		for i, c := range interrupts.cleanups {
+			if c == p {
+				interrupts.cleanups = append(interrupts.cleanups[:i], interrupts.cleanups[i+1:]...)
+				break
+			}
 		}
-	}()
-	return func() { signal.Stop(ch); close(ch) }
+	}
 }
 
 // saveState pauses a VM and writes its RAM and device state to file. Pausing
