@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -340,8 +341,14 @@ func (m *Meta) stopsAt() (t time.Time, ok bool) {
 	return t, ok
 }
 
-func alive(pid int) bool {
-	return pid > 0 && syscall.Kill(pid, 0) == nil
+// supervising reports whether m's supervisor is running. The PID alone is
+// not enough: after a crash or a reboot it may belong to something else.
+func supervising(m *Meta) bool {
+	if m.PID <= 0 {
+		return false
+	}
+	cl, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", m.PID))
+	return err == nil && bytes.Contains(cl, []byte("\x00_supervise\x00"+m.ID+"\x00"))
 }
 
 func destroy(id string) error {
@@ -352,12 +359,12 @@ func destroy(id string) error {
 		}
 		return err
 	}
-	if alive(m.PID) {
+	if supervising(m) {
 		syscall.Kill(m.PID, syscall.SIGTERM)
-		for i := 0; i < 100 && alive(m.PID); i++ {
+		for i := 0; i < 100 && supervising(m); i++ {
 			time.Sleep(20 * time.Millisecond)
 		}
-		if alive(m.PID) {
+		if supervising(m) {
 			syscall.Kill(m.PID, syscall.SIGKILL)
 		}
 	}
@@ -376,7 +383,7 @@ func listVMs() ([]*Meta, error) {
 		m, err := loadMeta(e.Name())
 		info, _ := e.Info()
 		starting := info != nil && time.Since(info.ModTime()) < time.Minute
-		dead := err != nil || (m.PID != 0 && !alive(m.PID)) || (m.PID == 0 && !starting)
+		dead := err != nil || (m.PID != 0 && !supervising(m)) || (m.PID == 0 && !starting)
 		if dead {
 			// The supervisor died without cleaning up (it was SIGKILLed, say),
 			// or a start was abandoned.

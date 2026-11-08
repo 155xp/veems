@@ -16,12 +16,21 @@ import (
 
 const qemuBin = "qemu-system-x86_64"
 
+// A QEMU process only reaches the run directory inside its VM (or build)
+// directory, and its disk. Everything the host trusts (meta.json, markers,
+// locks, logs) stays outside, so a compromised QEMU cannot edit it or plant
+// symlinks for the host to write through.
+func runDir(dir string) string     { return filepath.Join(dir, "run") }
+func qgaSock(dir string) string    { return filepath.Join(runDir(dir), "qga.sock") }
+func qmpSock(dir string) string    { return filepath.Join(runDir(dir), "qmp.sock") }
+func consoleLog(dir string) string { return filepath.Join(runDir(dir), "console.log") }
+
 // Spec is everything needed to start one QEMU process. Snapshot capture and
 // restore must produce identical device lists, so both go through qemuArgs.
 type Spec struct {
 	OS       string
 	Desktop  bool   // graphical image: bigger screen, USB tablet, VNC socket
-	Dir      string // holds sockets, logs, and (usually) the disk
+	Dir      string // host-side directory; QEMU gets its run directory
 	Disk     string
 	CPUs     int
 	MemMB    int
@@ -84,17 +93,17 @@ func qemuArgs(s Spec) []string {
 	a = append(a,
 		"-device", "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56",
 		"-device", "virtio-serial-pci,id=vser0",
-		"-chardev", "socket,id=qga0,path="+filepath.Join(s.Dir, "qga.sock")+",server=on,wait=off",
+		"-chardev", "socket,id=qga0,path="+qgaSock(s.Dir)+",server=on,wait=off",
 		"-device", "virtserialport,bus=vser0.0,chardev=qga0,name=org.qemu.guest_agent.0",
-		"-chardev", "file,id=ser0,path="+filepath.Join(s.Dir, "console.log"),
+		"-chardev", "file,id=ser0,path="+consoleLog(s.Dir),
 		"-serial", "chardev:ser0",
-		"-qmp", "unix:"+filepath.Join(s.Dir, "qmp.sock")+",server=on,wait=off",
+		"-qmp", "unix:"+qmpSock(s.Dir)+",server=on,wait=off",
 	)
 	if s.Desktop {
 		// An absolute pointer so clicks land where they are aimed, and a VNC
 		// server on a socket only this user can open (`veems view`).
 		a = append(a, "-device", "qemu-xhci,id=usb", "-device", "usb-tablet,bus=usb.0",
-			"-vnc", "unix:"+filepath.Join(s.Dir, "vnc.sock"))
+			"-vnc", "unix:"+filepath.Join(runDir(s.Dir), "vnc.sock"))
 	}
 	for i, iso := range s.CDROMs {
 		id := fmt.Sprintf("cd%d", i)
@@ -114,7 +123,7 @@ func qemuArgs(s Spec) []string {
 //	             (firewall: no host, no LAN) -> bwrap -> qemu
 //
 // bwrap also hides the host filesystem: QEMU sees /usr, /dev/kvm, the image
-// directory (read-only) and its own VM directory, nothing else.
+// directory (read-only), its disk, and the run directory, nothing else.
 func launchCmd(s Spec) (*exec.Cmd, error) {
 	qemu, err := exec.LookPath(qemuBin)
 	if err != nil {
@@ -135,9 +144,16 @@ func launchCmd(s Spec) (*exec.Cmd, error) {
 	for _, p := range s.ROBinds {
 		bw = append(bw, "--ro-bind", p, p)
 	}
-	bw = append(bw, "--bind", s.Dir, s.Dir, "--chdir", s.Dir)
+	run := runDir(s.Dir)
+	if err := os.MkdirAll(run, 0o700); err != nil {
+		return nil, err
+	}
+	for _, iso := range s.CDROMs {
+		bw = append(bw, "--ro-bind", iso, iso)
+	}
+	bw = append(bw, "--bind", s.Disk, s.Disk, "--bind", run, run, "--chdir", run)
 	if s.Net {
-		resolv := filepath.Join(s.Dir, "resolv.conf")
+		resolv := filepath.Join(run, "resolv.conf")
 		if err := os.WriteFile(resolv, []byte("nameserver "+dnsForward+"\n"), 0o644); err != nil {
 			return nil, err
 		}

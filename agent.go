@@ -73,7 +73,7 @@ func (a *agentConn) dial() error {
 	// Through the supervisor's proxy when there is one (see agentProxy).
 	sock := filepath.Join(a.dir, "agent.sock")
 	if !exists(sock) {
-		sock = filepath.Join(a.dir, "qga.sock")
+		sock = qgaSock(a.dir)
 	}
 	c, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
@@ -178,7 +178,7 @@ func agentProxy(dir string) error {
 	// closed would start its pause loop.
 	var qga net.Conn
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(2 * time.Millisecond) {
-		if qga, err = net.Dial("unix", filepath.Join(dir, "qga.sock")); err == nil {
+		if qga, err = net.Dial("unix", qgaSock(dir)); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -198,7 +198,7 @@ func agentProxy(dir string) error {
 				return
 			}
 			if qga == nil {
-				if qga, err = net.DialTimeout("unix", filepath.Join(dir, "qga.sock"), 5*time.Second); err != nil {
+				if qga, err = net.DialTimeout("unix", qgaSock(dir), 5*time.Second); err != nil {
 					qga = nil
 					cl.Close()
 					continue
