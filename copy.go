@@ -100,11 +100,14 @@ func push(m *Meta, src, dst string) error {
 			return err
 		}
 		defer f.Close()
+		if trailing {
+			dst = g.join(dst, filepath.Base(src))
+		}
 		out, err := mustExec(m, g.prepTarget(dst))
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(out) == "dir" || trailing {
+		if strings.TrimSpace(out) == "dir" {
 			dst = g.join(dst, filepath.Base(src))
 		}
 		return writeGuest(m, dst, f)
