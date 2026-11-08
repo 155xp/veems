@@ -551,8 +551,8 @@ func cmdLs(args []string) error {
 }
 
 func stopsIn(m *Meta) string {
-	t, ok := m.stopsAt()
-	if !ok {
+	t, why := m.stopsAt()
+	if why == "" {
 		return "never"
 	}
 	return max(time.Until(t), 0).Round(time.Second).String()
