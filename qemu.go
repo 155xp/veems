@@ -25,7 +25,6 @@ type Spec struct {
 	CPUs     int
 	MemMB    int
 	Net      bool     // filtered internet; false = no network at all
-	NetHub   bool     // with Net: reach it through a hub that netdev_del can cut (see prepare)
 	Incoming string   // snapshot state file to restore from
 	CDROMs   []string // build only
 	ROBinds  []string // extra read-only paths the sandbox needs
@@ -73,19 +72,13 @@ func qemuArgs(s Spec) []string {
 	} else {
 		a = append(a, "-device", "virtio-blk-pci,drive=disk0,bootindex=1")
 	}
-	switch {
-	case s.Net && s.NetHub:
-		// The NIC sits on the same hub port as with no network, and the
-		// internet joins the hub through ports that can be removed, which
-		// leaves the device state of a VM with no network.
-		a = append(a, "-netdev", "hubport,id=net0,hubid=0",
-			"-netdev", "user,id=uplink,ipv6=off,net=10.0.2.0/24",
+	// The NIC always sits on a hub. With --net the internet joins the hub
+	// through ports that can be removed (see prepare), which leaves exactly
+	// the device state of a VM with no network.
+	a = append(a, "-netdev", "hubport,id=net0,hubid=0")
+	if s.Net {
+		a = append(a, "-netdev", "user,id=uplink,ipv6=off,net=10.0.2.0/24",
 			"-netdev", "hubport,id=uplinkport,hubid=0,netdev=uplink")
-	case s.Net:
-		a = append(a, "-netdev", "user,id=net0,ipv6=off,net=10.0.2.0/24")
-	default:
-		// A NIC wired to an empty hub: the guest sees a link, nothing is on it.
-		a = append(a, "-netdev", "hubport,id=net0,hubid=0")
 	}
 	a = append(a,
 		"-device", "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56",
