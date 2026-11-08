@@ -164,9 +164,13 @@ func launchCmd(s Spec) (*exec.Cmd, error) {
 
 	var argv []string
 	if s.Net {
+		rules, err := firewallRules()
+		if err != nil {
+			return nil, err
+		}
 		argv = append([]string{"pasta", "--config-net", "--ipv4-only", "--no-map-gw", "--quiet",
 			"--dns-forward", dnsForward, "-t", "none", "-u", "none", "-T", "none", "-U", "none",
-			"--", "/bin/sh", "-c", netjailScript, "veems-netjail", firewallRules(), nftPath()}, bw...)
+			"--", "/bin/sh", "-c", netjailScript, "veems-netjail", rules, nftPath()}, bw...)
 	} else {
 		argv = bw
 	}

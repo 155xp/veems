@@ -18,26 +18,41 @@ var blockedV4 = []string{
 
 // firewallRules builds the egress firewall for a networked VM. pasta copies
 // the host's addresses and routes into its namespace, so they are read here.
-func firewallRules() string {
-	block := append([]string{}, blockedV4...)
-	// Subnets attached to the host (a LAN that uses public addresses, for one).
-	if out, err := exec.Command("ip", "-4", "-o", "route", "show", "scope", "link").Output(); err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			if f := strings.Fields(line); len(f) > 0 && f[0] != "default" {
-				block = append(block, f[0])
+// If they cannot be read, the VM does not start: the fixed ranges alone miss
+// a LAN or a host that uses public addresses.
+func firewallRules() (string, error) {
+	routes, err := exec.Command("ip", "-4", "-o", "route", "show", "scope", "link").Output()
+	if err != nil {
+		return "", fmt.Errorf("reading the host's routes for the firewall: %v (is iproute2 installed?)", err)
+	}
+	addrs, err := exec.Command("ip", "-4", "-o", "addr", "show").Output()
+	if err != nil {
+		return "", fmt.Errorf("reading the host's addresses for the firewall: %v (is iproute2 installed?)", err)
+	}
+	return nftRules(hostNets(string(routes), string(addrs))), nil
+}
+
+// hostNets lists the subnets attached to the host and its own addresses, from
+// `ip -o route show scope link` and `ip -o addr show`.
+func hostNets(routes, addrs string) []string {
+	var nets []string
+	for _, line := range strings.Split(routes, "\n") {
+		if f := strings.Fields(line); len(f) > 0 && f[0] != "default" {
+			nets = append(nets, f[0])
+		}
+	}
+	for _, line := range strings.Split(addrs, "\n") {
+		f := strings.Fields(line)
+		for i := 0; i+1 < len(f); i++ {
+			if f[i] == "inet" {
+				nets = append(nets, strings.SplitN(f[i+1], "/", 2)[0])
 			}
 		}
 	}
-	if out, err := exec.Command("ip", "-4", "-o", "addr", "show").Output(); err == nil {
-		for _, line := range strings.Split(string(out), "\n") {
-			f := strings.Fields(line)
-			for i := 0; i+1 < len(f); i++ {
-				if f[i] == "inet" {
-					block = append(block, strings.SplitN(f[i+1], "/", 2)[0])
-				}
-			}
-		}
-	}
+	return nets
+}
+
+func nftRules(hostNets []string) string {
 	return fmt.Sprintf(`table inet veems {
 	chain out {
 		type filter hook output priority 0; policy accept;
@@ -46,7 +61,7 @@ func firewallRules() string {
 %[2]s		meta nfproto ipv6 reject
 	}
 }
-`, dnsForward, blockRules(block))
+`, dnsForward, blockRules(append(append([]string{}, blockedV4...), hostNets...)))
 }
 
 // netjailScript runs inside pasta's network namespace, where it holds
