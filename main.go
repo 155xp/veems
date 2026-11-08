@@ -294,7 +294,6 @@ func osArg(f *flags, pos []string) (string, bool) {
 	return "", f.str("project", "") != ""
 }
 
-// execTarget turns positionals and the part after "--" into ExecOpts.
 func execTarget(f *flags, pos []string) (ExecOpts, error) {
 	var o ExecOpts
 	switch {
@@ -486,7 +485,7 @@ func cmdLs(args []string) error {
 	waiting := 0
 	for _, m := range all {
 		if m.Pool != "" {
-			waiting++ // pooled, see `veems pool`
+			waiting++
 		} else {
 			vms = append(vms, m)
 		}
@@ -601,7 +600,6 @@ func cmdTTL(args []string) error {
 	return nil
 }
 
-// vmArg resolves the first positional argument to a VM.
 func vmArg(pos []string, usage string) (*Meta, []string, error) {
 	if len(pos) == 0 {
 		return nil, nil, fmt.Errorf("usage: veems %s", usage)

@@ -25,7 +25,6 @@ func (g windowsGuest) proc(a *agentConn, o ExecOpts) (guestProc, error) {
 		Args: []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script}}, nil
 }
 
-// psQuote makes a PowerShell single-quoted string literal.
 func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // psScript wraps a command so errors print as plain text and, like bash, the

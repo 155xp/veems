@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// qmpConn is a connection to QEMU's monitor.
 type qmpConn struct {
 	c   net.Conn
 	dec *json.Decoder
@@ -63,7 +62,6 @@ func (q *qmpConn) do(cmd string, args any, timeout time.Duration) (json.RawMessa
 
 func (q *qmpConn) Close() { q.c.Close() }
 
-// qmp sends one command to the monitor of the VM in dir.
 func qmp(dir, cmd string, args any, timeout time.Duration) (json.RawMessage, error) {
 	q, err := dialQMP(dir, timeout)
 	if err != nil {

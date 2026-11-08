@@ -106,7 +106,6 @@ func newVM(o NewOpts) (*Meta, error) {
 	return m, err
 }
 
-// limit sets the lifetime limits of a VM that is being handed out.
 func (m *Meta) limit(o NewOpts) {
 	m.Name, m.IdleSecs = o.Name, int(o.Idle.Seconds())
 	m.Created, m.Deadline = time.Now().UTC(), time.Time{}
@@ -345,7 +344,6 @@ func alive(pid int) bool {
 	return pid > 0 && syscall.Kill(pid, 0) == nil
 }
 
-// destroy stops a VM and removes everything it wrote.
 func destroy(id string) error {
 	m, err := loadMeta(id)
 	if err != nil {

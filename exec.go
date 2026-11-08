@@ -47,7 +47,6 @@ func (st *execStatus) result() *ExecResult {
 	return r
 }
 
-// start starts p in the guest and returns its pid.
 func (a *agentConn) start(p guestProc, capture bool) (int, error) {
 	req := map[string]any{"path": p.Path, "arg": p.Args, "capture-output": capture}
 	if p.Env != nil {
@@ -121,10 +120,9 @@ func guestExec(m *Meta, o ExecOpts) (*ExecResult, error) {
 
 func killGuestTree(a *agentConn, m *Meta, pid int) {
 	a.run(m.guest().killTree(pid), 3*time.Second)
-	a.call("guest-exec-status", map[string]any{"pid": pid}, &execStatus{}, 10*time.Second) // reaps it
+	a.call("guest-exec-status", map[string]any{"pid": pid}, &execStatus{}, 10*time.Second) // the agent keeps an exited process until its status is read
 }
 
-// mustExec runs a helper command in the guest and fails on a nonzero exit.
 func mustExec(m *Meta, o ExecOpts) (string, error) {
 	r, err := guestExec(m, o)
 	if err != nil {
