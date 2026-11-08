@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -107,7 +108,7 @@ func push(m *Meta, src, dst string) error {
 		if err != nil {
 			return err
 		}
-		return writeGuest(m, strings.TrimSpace(out), f)
+		return writeGuest(m, strings.TrimRight(out, "\r\n"), f)
 	}
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(writeTar(pw, src)) }()
@@ -178,8 +179,12 @@ func pull(m *Meta, src, dst string) error {
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(out) == "file" {
-		return pullFile(m, src, dst)
+	if kind, mode, _ := strings.Cut(strings.TrimSpace(out), " "); kind == "file" {
+		perm, err := strconv.ParseUint(mode, 8, 32)
+		if err != nil {
+			perm = 0o644
+		}
+		return pullFile(m, src, dst, os.FileMode(perm)&0o755) // never writable by others
 	}
 	defer guestExec(m, g.remove(tar))
 	pr, pw := io.Pipe()
@@ -189,13 +194,17 @@ func pull(m *Meta, src, dst string) error {
 	return err
 }
 
-func pullFile(m *Meta, src, dst string) error {
+// pullFile copies a guest file to dst with mode (without setuid and such).
+func pullFile(m *Meta, src, dst string, mode os.FileMode) error {
 	tmp := dst + ".veems-partial"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	err = readGuest(m, src, f)
+	if err == nil {
+		err = f.Chmod(mode)
+	}
 	f.Close()
 	if err != nil {
 		os.Remove(tmp)

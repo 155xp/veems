@@ -168,7 +168,7 @@ func TestClaimSkipsStaleAndSetsLimits(t *testing.T) {
 	fakePooled(t, "lnx-net001", "linux+net", src.stamp())
 	fakePooled(t, "lnx-fresh1", "linux", src.stamp())
 
-	m := claim(NewOpts{OS: "linux", Name: "mine", TTL: time.Hour, Idle: 5 * time.Minute}, src)
+	m := claim(NewOpts{OS: "linux", Name: "mine", TTL: time.Hour, Idle: 5 * time.Minute}, src, "linux")
 	if m == nil || m.ID != "lnx-fresh1" {
 		t.Fatalf("claimed %+v, want lnx-fresh1", m)
 	}
@@ -194,7 +194,7 @@ func TestClaimSkipsStaleAndSetsLimits(t *testing.T) {
 	if _, err := resolve("lnx-net"); err == nil {
 		t.Error("a waiting vm should not resolve by prefix")
 	}
-	if claim(NewOpts{OS: "linux"}, src) != nil {
+	if claim(NewOpts{OS: "linux"}, src, "linux") != nil {
 		t.Error("claimed from an empty pool")
 	}
 }

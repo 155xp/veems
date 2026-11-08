@@ -2,14 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -268,21 +271,26 @@ func running(pid string) bool {
 var interrupts struct {
 	sync.Mutex
 	once     sync.Once
+	fired    atomic.Bool
 	cleanups []*func()
 }
 
 // onInterrupt runs cleanup if this process is interrupted or told to stop
 // before the returned cancel is called. Cleanups run newest first, then the
-// process exits.
+// process exits; a second signal exits at once.
 func onInterrupt(cleanup func()) (cancel func()) {
 	interrupts.once.Do(func() {
-		ch := make(chan os.Signal, 1)
+		ch := make(chan os.Signal, 2)
 		signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 		go func() {
 			<-ch
+			interrupts.fired.Store(true)
+			go func() { <-ch; os.Exit(130) }()
 			interrupts.Lock()
-			for i := len(interrupts.cleanups) - 1; i >= 0; i-- {
-				(*interrupts.cleanups[i])()
+			cs := slices.Clone(interrupts.cleanups)
+			interrupts.Unlock()
+			for i := len(cs) - 1; i >= 0; i-- {
+				(*cs[i])()
 			}
 			os.Exit(130)
 		}()
@@ -294,14 +302,18 @@ func onInterrupt(cleanup func()) (cancel func()) {
 	return func() {
 		interrupts.Lock()
 		defer interrupts.Unlock()
-		for i, c := range interrupts.cleanups {
-			if c == p {
-				interrupts.cleanups = append(interrupts.cleanups[:i], interrupts.cleanups[i+1:]...)
-				break
-			}
+		if i := slices.Index(interrupts.cleanups, p); i >= 0 {
+			interrupts.cleanups = slices.Delete(interrupts.cleanups, i, i+1)
 		}
 	}
 }
+
+// interrupted reports that the cleanups own the process now: work in
+// progress should stop and leave them its locks, and the process must not
+// exit before they do (see main).
+func interrupted() bool { return interrupts.fired.Load() }
+
+var errInterrupted = errors.New("interrupted")
 
 // saveState pauses a VM and writes its RAM and device state to file. Pausing
 // flushes the disk, so the disk and the state match.

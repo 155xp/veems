@@ -38,8 +38,8 @@ func psScript(cwd string, o ExecOpts) string {
 		k, v, _ := strings.Cut(kv, "=")
 		fmt.Fprintf(&s, "Set-Item -LiteralPath %s -Value %s\n", psQuote("env:"+k), psQuote(v))
 	}
-	// Like the Linux side, a bad cwd exits 125 before the command runs.
-	fmt.Fprintf(&s, "try { Set-Location -LiteralPath %s -ErrorAction Stop } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 125 }\n$global:LASTEXITCODE=$null\n", psQuote(cwd))
+	// Like on Linux, a bad cwd fails as veems itself does, before the command runs.
+	fmt.Fprintf(&s, "try { Set-Location -LiteralPath %s -ErrorAction Stop } catch { [Console]::Error.WriteLine($_.Exception.Message); exit %d }\n$global:LASTEXITCODE=$null\n", psQuote(cwd), exitVeems)
 	if o.Line != "" {
 		s.WriteString(o.Line + "\n")
 	} else {

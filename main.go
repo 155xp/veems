@@ -88,7 +88,11 @@ func main() {
 		fmt.Print(usage)
 		os.Exit(2)
 	}
-	os.Exit(run(os.Args[1], os.Args[2:]))
+	code := run(os.Args[1], os.Args[2:])
+	if interrupted() {
+		select {} // the interrupt cleanups exit when they are done
+	}
+	os.Exit(code)
 }
 
 func run(cmd string, args []string) int {
@@ -352,11 +356,22 @@ func commandFlagHint(err error) error {
 	return err
 }
 
-func emit(r *ExecResult, asJSON bool) int {
+// emit prints a command's result and returns the exit code. failed is a
+// veems failure after the command ran, such as a --pull, which turns a
+// success into exitVeems.
+func emit(r *ExecResult, asJSON bool, failed error) int {
+	code := r.ExitCode
+	if failed != nil && code == 0 {
+		code = exitVeems
+	}
 	if asJSON {
-		printJSON(map[string]any{"exit_code": r.ExitCode, "stdout": string(r.Stdout), "stderr": string(r.Stderr),
-			"timed_out": r.TimedOut, "truncated": r.Truncated})
-		return r.ExitCode
+		out := map[string]any{"exit_code": code, "stdout": string(r.Stdout), "stderr": string(r.Stderr),
+			"timed_out": r.TimedOut, "truncated": r.Truncated}
+		if failed != nil {
+			out["error"] = failed.Error()
+		}
+		printJSON(out)
+		return code
 	}
 	os.Stdout.Write(r.Stdout)
 	os.Stderr.Write(r.Stderr)
@@ -366,7 +381,10 @@ func emit(r *ExecResult, asJSON bool) int {
 	if r.Truncated {
 		fmt.Fprintln(os.Stderr, "veems: output was over 16 MB and got cut; write it to a file and `veems cp` it out")
 	}
-	return r.ExitCode
+	if failed != nil {
+		fmt.Fprintln(os.Stderr, "veems:", failed)
+	}
+	return code
 }
 
 const execValued = "cwd env timeout"
@@ -393,13 +411,16 @@ func cmdExec(args []string) (int, error) {
 		return exitVeems, err
 	}
 	if f.bools["gui"] {
-		return 0, launchGUI(m, o)
+		if err := launchGUI(m, o); err != nil {
+			return exitVeems, err
+		}
+		return 0, nil
 	}
 	r, err := guestExec(m, o)
 	if err != nil {
 		return exitVeems, err
 	}
-	return emit(r, f.bools["json"]), nil
+	return emit(r, f.bools["json"], nil), nil
 }
 
 // splitRemote parses "<vm>:path"; ok is false for a local path.
@@ -483,22 +504,16 @@ func cmdRun(args []string) (int, error) {
 	if err != nil {
 		return exitVeems, err
 	}
-	var pullErr error
+	var pullErrs []error
 	for _, spec := range f.vals["pull"] {
 		remote, local, ok := cutLast(spec)
 		if !ok {
-			pullErr = fmt.Errorf("--pull wants REMOTE:LOCAL, got %q", spec)
+			pullErrs = append(pullErrs, fmt.Errorf("--pull wants REMOTE:LOCAL, got %q", spec))
 		} else if err := pull(m, remote, local); err != nil {
-			pullErr = fmt.Errorf("pull %s: %w", spec, err)
-		}
-		if pullErr != nil {
-			fmt.Fprintln(os.Stderr, "veems:", pullErr)
+			pullErrs = append(pullErrs, fmt.Errorf("pull %s: %w", spec, err))
 		}
 	}
-	code := emit(r, f.bools["json"])
-	if pullErr != nil && code == 0 {
-		code = exitVeems
-	}
+	code := emit(r, f.bools["json"], errors.Join(pullErrs...))
 	return code, nil
 }
 

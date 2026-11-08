@@ -17,7 +17,7 @@ func screenshot(id string) (png []byte, w, h int, err error) {
 	if _, err := qmp(dir, "screendump", map[string]any{"filename": tmp, "format": "png"}, 30*time.Second); err != nil {
 		return nil, 0, 0, err
 	}
-	png, err = readNoFollow(tmp)
+	png, err = readQEMUFile(tmp, 64<<20)
 	if err != nil {
 		return nil, 0, 0, err
 	}

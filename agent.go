@@ -71,11 +71,12 @@ func (a *agentConn) dial() error {
 		return fmt.Errorf("vm not found: %s", filepath.Base(a.dir))
 	}
 	// Through the supervisor's proxy when there is one (see agentProxy).
-	sock := filepath.Join(a.dir, "agent.sock")
-	if !exists(sock) {
-		sock = qgaSock(a.dir)
+	var c net.Conn
+	if proxy := filepath.Join(a.dir, "agent.sock"); exists(proxy) {
+		c, err = net.DialTimeout("unix", proxy, 5*time.Second)
+	} else {
+		c, err = dialQEMU(qgaSock(a.dir), 5*time.Second)
 	}
-	c, err := net.DialTimeout("unix", sock, 5*time.Second)
 	if err != nil {
 		lock.Close()
 		return fmt.Errorf("guest agent unreachable: %w", err)
@@ -178,7 +179,7 @@ func agentProxy(dir string) error {
 	// closed would start its pause loop.
 	var qga net.Conn
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(2 * time.Millisecond) {
-		if qga, err = net.Dial("unix", qgaSock(dir)); err == nil {
+		if qga, err = dialQEMU(qgaSock(dir), time.Second); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -198,7 +199,7 @@ func agentProxy(dir string) error {
 				return
 			}
 			if qga == nil {
-				if qga, err = net.DialTimeout("unix", qgaSock(dir), 5*time.Second); err != nil {
+				if qga, err = dialQEMU(qgaSock(dir), 5*time.Second); err != nil {
 					qga = nil
 					cl.Close()
 					continue

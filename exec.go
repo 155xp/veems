@@ -77,6 +77,9 @@ func (a *agentConn) wait(pid int, deadline time.Time) (*execStatus, error) {
 		if !deadline.IsZero() && time.Now().After(deadline) {
 			return nil, nil
 		}
+		if interrupted() {
+			return nil, errInterrupted
+		}
 		time.Sleep(delay)
 		delay = min(delay*3/2, 200*time.Millisecond)
 	}

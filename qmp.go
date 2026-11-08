@@ -13,7 +13,7 @@ type qmpConn struct {
 }
 
 func dialQMP(dir string, timeout time.Duration) (*qmpConn, error) {
-	c, err := net.DialTimeout("unix", qmpSock(dir), 3*time.Second)
+	c, err := dialQEMU(qmpSock(dir), 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("vm monitor unreachable: %w", err)
 	}
