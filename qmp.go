@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"path/filepath"
 	"time"
 )
 
@@ -14,7 +13,7 @@ type qmpConn struct {
 }
 
 func dialQMP(dir string, timeout time.Duration) (*qmpConn, error) {
-	c, err := net.DialTimeout("unix", filepath.Join(dir, "qmp.sock"), 3*time.Second)
+	c, err := net.DialTimeout("unix", qmpSock(dir), 3*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("vm monitor unreachable: %w", err)
 	}

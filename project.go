@@ -110,9 +110,10 @@ func prepare(o PrepOpts) (*Project, error) {
 	if !snap.current() {
 		return nil, fmt.Errorf("the %s image needs a current snapshot first: `%s --snapshot`", p.Key, p.buildCmd())
 	}
-	if err := os.MkdirAll(projectsDir(), 0o755); err != nil {
+	if err := os.MkdirAll(projectsDir(), 0o700); err != nil {
 		return nil, err
 	}
+	os.Chmod(projectsDir(), 0o700) // made 0755 by older versions
 	lock, err := lockFile(filepath.Join(projectsDir(), "."+o.Name+".lock"), false)
 	if err != nil {
 		return nil, fmt.Errorf("project %s is already being prepared", o.Name)
@@ -194,7 +195,7 @@ func prepare(o PrepOpts) (*Project, error) {
 			}
 		}
 	}
-	if err := saveState(dir, filepath.Join(dir, "snap.state")); err != nil {
+	if err := saveState(dir, filepath.Join(runDir(dir), "snap.state")); err != nil {
 		return nil, err
 	}
 
@@ -206,19 +207,22 @@ func prepare(o PrepOpts) (*Project, error) {
 	if err := os.Rename(filepath.Join(dir, "disk.qcow2"), filepath.Join(work, "disk.qcow2")); err != nil {
 		return nil, err
 	}
-	if err := os.Rename(filepath.Join(dir, "snap.state"), filepath.Join(work, "snap.state")); err != nil {
+	if err := os.Rename(filepath.Join(runDir(dir), "snap.state"), filepath.Join(work, "snap.state")); err != nil {
 		return nil, err
 	}
 	destroy(m.ID) // QEMU holds the disk's write lock until it exits
-	os.Chmod(filepath.Join(work, "disk.qcow2"), 0o444)
-	os.Chmod(filepath.Join(work, "snap.state"), 0o444)
+	if err := checkRegular(filepath.Join(work, "snap.state")); err != nil {
+		return nil, err
+	}
+	// The checkout and the saved RAM can hold private code and credentials.
+	os.Chmod(filepath.Join(work, "disk.qcow2"), 0o400)
+	os.Chmod(filepath.Join(work, "snap.state"), 0o400)
 	pj.Prepared = time.Now().UTC()
 	pj.PrepSecs = time.Since(start).Seconds()
 	b, _ := json.MarshalIndent(pj, "", "  ")
-	if err := os.WriteFile(filepath.Join(work, "project.json"), b, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(work, "project.json"), b, 0o600); err != nil {
 		return nil, err
 	}
-	os.Chmod(work, 0o755)
 	old := work + ".old"
 	if exists(projectDir(o.Name)) {
 		if err := os.Rename(projectDir(o.Name), old); err != nil {

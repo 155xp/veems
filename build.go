@@ -106,7 +106,7 @@ func runToPoweroff(s Spec, limit time.Duration) error {
 			return nil
 		case <-tick.C:
 			el := time.Since(start).Round(time.Second)
-			logf("  still installing (%s elapsed; console: %s)", el, filepath.Join(s.Dir, "console.log"))
+			logf("  still installing (%s elapsed; console: %s)", el, consoleLog(s.Dir))
 			if el > limit {
 				cmd.Process.Kill()
 				return fmt.Errorf("build did not finish within %s; see %s", limit, s.Dir)
@@ -236,12 +236,14 @@ func buildWindows(p *Profile, o BuildOpts) error {
 func installBase(p *Profile, work, disk string) error {
 	logf("compacting base image")
 	base := basePath(p.Key)
-	for _, f := range []string{base, tmplDisk(p.Key), tmplState(p.Key), tmplMeta(p.Key)} {
-		os.Chmod(f, 0o644)
-		os.Remove(f)
-	}
 	if o, err := exec.Command("qemu-img", "convert", "-O", "qcow2", "-o", "cluster_size=65536", disk, base+".tmp").CombinedOutput(); err != nil {
+		os.Remove(base + ".tmp")
 		return fmt.Errorf("qemu-img convert: %v: %s", err, o)
+	}
+	// The old snapshot sits on the old base; until a new one is captured,
+	// VMs cold boot.
+	for _, f := range []string{tmplMeta(p.Key), tmplDisk(p.Key), tmplState(p.Key)} {
+		os.Remove(f)
 	}
 	if err := os.Rename(base+".tmp", base); err != nil {
 		return err
@@ -261,10 +263,6 @@ func captureSnapshot(p *Profile) error {
 		return err
 	}
 	defer os.RemoveAll(work)
-	for _, f := range []string{tmplDisk(p.Key), tmplState(p.Key), tmplMeta(p.Key)} {
-		os.Chmod(f, 0o644)
-		os.Remove(f)
-	}
 	disk := filepath.Join(work, "snap.qcow2")
 	if err := qemuImgCreate(disk, basePath(p.Key), 0); err != nil {
 		return err
@@ -297,7 +295,7 @@ func captureSnapshot(p *Profile) error {
 		default:
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("guest agent never came up; console log: %s", filepath.Join(work, "console.log"))
+			return fmt.Errorf("guest agent never came up; console log: %s", consoleLog(work))
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -310,13 +308,19 @@ func captureSnapshot(p *Profile) error {
 	if err := a.call("guest-ping", nil, nil, 10*time.Second); err != nil {
 		return fmt.Errorf("guest agent: %w", err)
 	}
-	state := filepath.Join(work, "snap.state")
+	state := filepath.Join(runDir(work), "snap.state")
 	if err := saveState(work, state); err != nil {
 		return err
 	}
 	qmp(work, "quit", nil, 5*time.Second)
 	<-done
 
+	if err := checkRegular(state); err != nil {
+		return err
+	}
+	// Until the new files are all in place, readers see no snapshot (and
+	// cold boot) rather than a disk and a state that do not belong together.
+	os.Remove(tmplMeta(p.Key))
 	if err := os.Rename(disk, tmplDisk(p.Key)); err != nil {
 		return err
 	}
@@ -326,7 +330,7 @@ func captureSnapshot(p *Profile) error {
 	os.Chmod(tmplDisk(p.Key), 0o444)
 	os.Chmod(tmplState(p.Key), 0o444)
 	b, _ := json.Marshal(snapInfo{QEMU: qemuVersion(), CPUs: p.CPUs, MemMB: p.MemMB})
-	if err := os.WriteFile(tmplMeta(p.Key), b, 0o644); err != nil {
+	if err := writeAtomic(tmplMeta(p.Key), b, 0o644); err != nil {
 		return err
 	}
 	st, _ := os.Stat(tmplState(p.Key))

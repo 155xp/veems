@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,4 +116,22 @@ func lockFile(path string, wait bool) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// readNoFollow reads a file QEMU wrote, refusing a symlink in its place.
+func readNoFollow(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+// checkRegular refuses anything but a regular file where QEMU was to write one.
+func checkRegular(path string) error {
+	if st, err := os.Lstat(path); err != nil || !st.Mode().IsRegular() {
+		return fmt.Errorf("%s: not a regular file", path)
+	}
+	return nil
 }

@@ -12,12 +12,12 @@ import (
 
 func screenshot(id string) (png []byte, w, h int, err error) {
 	dir := vmDir(id)
-	tmp := filepath.Join(dir, fmt.Sprintf("screen-%d.png", time.Now().UnixNano()))
+	tmp := filepath.Join(runDir(dir), fmt.Sprintf("screen-%d.png", time.Now().UnixNano()))
 	defer os.Remove(tmp)
 	if _, err := qmp(dir, "screendump", map[string]any{"filename": tmp, "format": "png"}, 30*time.Second); err != nil {
 		return nil, 0, 0, err
 	}
-	png, err = os.ReadFile(tmp)
+	png, err = readNoFollow(tmp)
 	if err != nil {
 		return nil, 0, 0, err
 	}

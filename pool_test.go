@@ -21,10 +21,11 @@ func tempHome(t *testing.T) string {
 	return h
 }
 
-// fakeAgent answers guest-agent requests on sock: syncs, pings, set-time.
-// It counts connections so tests can see whether callers reconnected.
-func fakeAgent(t *testing.T, sock string) *atomic.Int32 {
-	ln, err := net.Listen("unix", sock)
+// fakeAgent answers guest-agent requests for the VM in dir: syncs, pings,
+// set-time. It counts connections so tests can see whether callers reconnected.
+func fakeAgent(t *testing.T, dir string) *atomic.Int32 {
+	os.MkdirAll(runDir(dir), 0o700)
+	ln, err := net.Listen("unix", qgaSock(dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +71,7 @@ func fakeAgent(t *testing.T, sock string) *atomic.Int32 {
 
 func TestAgentConnReusesOneConnection(t *testing.T) {
 	dir := t.TempDir()
-	conns := fakeAgent(t, filepath.Join(dir, "qga.sock"))
+	conns := fakeAgent(t, dir)
 	a := &agentConn{dir: dir}
 	for i := 0; i < 5; i++ {
 		if err := a.call("guest-ping", nil, nil, time.Second); err != nil {
@@ -89,7 +90,7 @@ func TestAgentConnReusesOneConnection(t *testing.T) {
 
 func TestAgentProxyKeepsTheGuestConnection(t *testing.T) {
 	dir := t.TempDir()
-	conns := fakeAgent(t, filepath.Join(dir, "qga.sock"))
+	conns := fakeAgent(t, dir)
 	if err := agentProxy(dir); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +139,7 @@ func TestTakeIsExclusive(t *testing.T) {
 // fakePooled makes a waiting VM: a live stand-in supervisor, a meta file, the
 // pooled marker, and an agent that answers.
 func fakePooled(t *testing.T, id, pool, source string) {
-	sup := exec.Command("sleep", "60")
+	sup := exec.Command("sh", "-c", "sleep 60; true", "_supervise", id)
 	if err := sup.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,7 @@ func fakePooled(t *testing.T, id, pool, source string) {
 	t.Cleanup(func() { sup.Process.Kill() })
 	dir := vmDir(id)
 	os.MkdirAll(dir, 0o700)
-	fakeAgent(t, filepath.Join(dir, "qga.sock"))
+	fakeAgent(t, dir)
 	os.WriteFile(filepath.Join(dir, "activity"), nil, 0o600)
 	os.WriteFile(filepath.Join(dir, "pooled"), nil, 0o600)
 	if err := saveMeta(&Meta{ID: id, OS: "linux", CPUs: 2, MemMB: 1024, Pool: pool, Source: source,
