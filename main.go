@@ -286,13 +286,6 @@ func cmdNew(args []string) error {
 	return nil
 }
 
-func first(s []string) string {
-	if len(s) == 0 {
-		return ""
-	}
-	return s[0]
-}
-
 // osArg is the os positional, which --project makes optional.
 func osArg(f *flags, pos []string) (string, bool) {
 	if len(pos) > 0 {
@@ -421,12 +414,15 @@ func cmdRun(args []string) (int, error) {
 	if err != nil {
 		return 2, err
 	}
+	// With --project the os is optional, so the first word may be the command.
 	pos, osName := f.pos, ""
-	if _, err := profile(first(pos), false); err == nil || f.str("project", "") == "" {
-		if len(pos) < 1 {
-			return 2, fmt.Errorf("usage: veems run <linux|windows> [flags] ('line' | -- prog args...)")
+	if len(pos) > 0 {
+		if _, err := profile(pos[0], false); err == nil || f.str("project", "") == "" {
+			osName, pos = pos[0], pos[1:]
 		}
-		osName, pos = pos[0], pos[1:]
+	}
+	if osName == "" && f.str("project", "") == "" {
+		return 2, fmt.Errorf("usage: veems run <linux|windows> [flags] ('line' | -- prog args...)")
 	}
 	no, err := newOpts(f, osName)
 	if err != nil {

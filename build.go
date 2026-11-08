@@ -289,8 +289,10 @@ func captureSnapshot(p *Profile) error {
 	defer func() { killVMProcs(work); cmd.Process.Kill(); <-done }()
 
 	logf("booting %s to snapshot it", p.Key)
+	a := &agentConn{dir: work}
+	defer a.close()
 	deadline := time.Now().Add(p.Boot)
-	for agentCall(work, "guest-ping", nil, nil, 2*time.Second) != nil {
+	for a.call("guest-ping", nil, nil, 2*time.Second) != nil {
 		select {
 		case <-done:
 			b, _ := os.ReadFile(filepath.Join(work, "qemu.log"))
@@ -304,8 +306,6 @@ func captureSnapshot(p *Profile) error {
 	}
 	logf("guest up after %s; letting it settle for %s", time.Since(start).Round(time.Second), p.Settle)
 	time.Sleep(p.Settle)
-	a := &agentConn{dir: work}
-	defer a.close()
 	p.guest().beforeSnapshot(a)
 
 	// Save with the agent connected, as it is after every restore (see

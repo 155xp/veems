@@ -88,17 +88,6 @@ func tmplMeta(key string) string  { return filepath.Join(imageDir(key), "snap.js
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 
-// stamp identifies one saved snapshot. Rebuilding an image or re-preparing a
-// project writes a new state file, so the stamp changes and anything made
-// from the old one (projects, pooled VMs) is known to be stale.
-func stamp(file string) string {
-	st, err := os.Stat(file)
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%d.%d", st.Size(), st.ModTime().UnixNano())
-}
-
 // writeAtomic replaces path with data, so readers see the old or the new
 // file, never part of one.
 func writeAtomic(path string, data []byte, perm os.FileMode) error {

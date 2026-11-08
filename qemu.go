@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -256,4 +257,33 @@ func onInterrupt(cleanup func()) (cancel func()) {
 		}
 	}()
 	return func() { signal.Stop(ch); close(ch) }
+}
+
+// saveState pauses a VM and writes its RAM and device state to file. Pausing
+// flushes the disk, so the disk and the state match.
+func saveState(dir, file string) error {
+	if _, err := qmp(dir, "stop", nil, 30*time.Second); err != nil {
+		return fmt.Errorf("pausing vm: %w", err)
+	}
+	if _, err := qmp(dir, "migrate", map[string]any{"uri": "file:" + file}, 30*time.Second); err != nil {
+		return fmt.Errorf("saving vm state: %w", err)
+	}
+	for {
+		raw, err := qmp(dir, "query-migrate", nil, 10*time.Second)
+		if err != nil {
+			return err
+		}
+		var st struct {
+			Status string `json:"status"`
+			Error  string `json:"error-desc"`
+		}
+		json.Unmarshal(raw, &st)
+		switch st.Status {
+		case "completed":
+			return nil
+		case "failed", "cancelled":
+			return fmt.Errorf("saving vm state: %s %s", st.Status, st.Error)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }

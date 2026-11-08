@@ -45,16 +45,6 @@ type reply struct {
 	Error  *rpcError       `json:"error"`
 }
 
-// guestCall runs one guest-agent command in its own short connection, under a
-// per-VM lock, so any number of processes can share a VM.
-func guestCall(id, cmd string, args any, out any, timeout time.Duration) error {
-	return guestSession(id).callOnce(cmd, args, out, timeout)
-}
-
-func agentCall(dir, cmd string, args any, out any, timeout time.Duration) error {
-	return (&agentConn{dir: dir}).callOnce(cmd, args, out, timeout)
-}
-
 // agentHold is how long one process may keep a VM's agent connection before
 // handing it back. The guest agent idles ~100 ms after every disconnect, so a
 // burst of calls is much faster over one connection, but other processes
@@ -102,11 +92,6 @@ func (a *agentConn) close() {
 		a.lock.Close()
 		a.c, a.lock = nil, nil
 	}
-}
-
-func (a *agentConn) callOnce(cmd string, args any, out any, timeout time.Duration) error {
-	defer a.close()
-	return a.call(cmd, args, out, timeout)
 }
 
 // call runs one command. Each call starts with a delimited sync, which throws
