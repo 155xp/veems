@@ -200,16 +200,18 @@ func TestClaimSkipsStaleAndSetsLimits(t *testing.T) {
 
 func TestPoolsFile(t *testing.T) {
 	tempHome(t)
-	if err := savePools([]PoolTarget{{Image: "linux", Size: 2}, {Image: "linux", Project: "app", Net: true, Size: 1}}); err != nil {
+	offline := PoolTarget{Image: "linux", Project: "app", Size: 1}
+	online := PoolTarget{Image: "linux", Project: "app", Net: true, Size: 3}
+	if err := savePools([]PoolTarget{{Image: "linux", Size: 2}, online}); err != nil {
 		t.Fatal(err)
 	}
-	if tg, ok := poolTarget("linux"); !ok || tg.Size != 2 {
+	if tg, ok := poolTarget(PoolTarget{Image: "linux"}.key()); !ok || tg.Size != 2 {
 		t.Errorf("linux pool: %+v %v", tg, ok)
 	}
-	if _, ok := poolTarget("project:app+net"); !ok {
-		t.Error("project pool missing")
+	if tg, ok := poolTarget(online.key()); !ok || tg.Size != 3 {
+		t.Errorf("networked project pool: %+v %v", tg, ok)
 	}
-	if _, ok := poolTarget("project:app"); ok {
+	if _, ok := poolTarget(offline.key()); ok {
 		t.Error("networked and offline pools must be separate")
 	}
 }
