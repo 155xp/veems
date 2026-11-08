@@ -94,6 +94,14 @@ func newVM(o NewOpts) (*Meta, error) {
 	if err != nil {
 		return nil, err
 	}
+	if o.Name != "" {
+		vms, _ := listVMs()
+		for _, m := range vms {
+			if m.Name == o.Name && m.Pool == "" {
+				return nil, fmt.Errorf("a vm named %s is already running (%s)", o.Name, m.ID)
+			}
+		}
+	}
 	defer refill(poolKey(src.prof.Key, src.project, o.Net))
 	if !o.Cold && !o.NoPool {
 		if m := claim(o, src); m != nil {
@@ -284,8 +292,9 @@ func supervise(id string) error {
 		os.WriteFile(filepath.Join(dir, fileExited), nil, 0o600)
 		return err
 	}
+	var exitErr error
 	done := make(chan struct{})
-	go func() { cmd.Wait(); close(done) }()
+	go func() { exitErr = cmd.Wait(); close(done) }()
 	if err := agentProxy(dir); err != nil {
 		fmt.Fprintln(qlog, "veems: agent proxy:", err) // clients fall back to the agent socket
 	}
@@ -298,19 +307,26 @@ func supervise(id string) error {
 		cmd.Process.Kill()
 		<-done
 	}
+	var why string
 loop:
 	for {
 		select {
 		case <-done:
+			why = "the guest shut down"
+			if exitErr != nil {
+				why = fmt.Sprintf("QEMU exited (%v); its log was %s", exitErr, lastLine(filepath.Join(dir, "qemu.log")))
+			}
 			break loop
 		case <-sig:
+			why = "it was removed with veems rm"
 			stop()
 			break loop
 		case <-tick.C:
 			if cur, err := loadMeta(id); err == nil {
 				m = cur
 			}
-			if t, ok := m.stopsAt(); ok && time.Now().After(t) {
+			if t, w := m.stopsAt(); w != "" && time.Now().After(t) {
+				why = w
 				stop()
 				break loop
 			}
@@ -322,24 +338,42 @@ loop:
 		os.WriteFile(filepath.Join(dir, fileExited), nil, 0o600)
 		return nil
 	}
+	if m.Pool == "" {
+		bury(id, why)
+	}
 	return os.RemoveAll(dir)
 }
 
-// stopsAt is when the supervisor stops m: at its deadline or its idle limit,
-// whichever comes first. ok is false if it has neither.
-func (m *Meta) stopsAt() (t time.Time, ok bool) {
+// stopsAt is when the supervisor stops m, at its deadline or its idle limit,
+// whichever comes first, and why. why is "" if it has neither.
+func (m *Meta) stopsAt() (t time.Time, why string) {
 	if !m.Deadline.IsZero() {
-		t, ok = m.Deadline, true
+		t, why = m.Deadline, "it reached its --ttl limit"
 	}
 	if m.IdleSecs > 0 {
 		if st, err := os.Stat(filepath.Join(vmDir(m.ID), fileActivity)); err == nil {
 			idle := st.ModTime().Add(time.Duration(m.IdleSecs) * time.Second)
-			if !ok || idle.Before(t) {
-				t, ok = idle, true
+			if why == "" || idle.Before(t) {
+				t, why = idle, fmt.Sprintf("it had no veems commands for %s (its --idle limit)", time.Duration(m.IdleSecs)*time.Second)
 			}
 		}
 	}
-	return t, ok
+	return t, why
+}
+
+func goneDir() string { return filepath.Join(vmsDir(), ".gone") }
+
+// bury notes why a VM stopped, so commands that still name it can say so
+// instead of "no such vm". Notes older than an hour are cleared away.
+func bury(id, why string) {
+	os.MkdirAll(goneDir(), 0o700)
+	ents, _ := os.ReadDir(goneDir())
+	for _, e := range ents {
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > time.Hour {
+			os.Remove(filepath.Join(goneDir(), e.Name()))
+		}
+	}
+	os.WriteFile(filepath.Join(goneDir(), id), []byte(why), 0o600)
 }
 
 // supervising reports whether m's supervisor is running. The PID alone is
@@ -381,6 +415,9 @@ func listVMs() ([]*Meta, error) {
 	}
 	var out []*Meta
 	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
 		m, err := loadMeta(e.Name())
 		info, _ := e.Info()
 		starting := info != nil && time.Since(info.ModTime()) < time.Minute
@@ -416,6 +453,9 @@ func resolve(ref string) (string, error) {
 	case 1:
 		return hits[0], nil
 	case 0:
+		if why, err := os.ReadFile(filepath.Join(goneDir(), filepath.Base(ref))); err == nil {
+			return "", fmt.Errorf("vm %s is gone: %s", ref, why)
+		}
 		return "", fmt.Errorf("no such vm: %s", ref)
 	}
 	return "", fmt.Errorf("%q matches several vms: %s", ref, strings.Join(hits, ", "))

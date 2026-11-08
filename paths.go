@@ -135,3 +135,9 @@ func checkRegular(path string) error {
 	}
 	return nil
 }
+
+func lastLine(path string) string {
+	b, _ := os.ReadFile(path)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
