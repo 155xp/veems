@@ -251,13 +251,14 @@ func running(pid string) bool {
 	return !strings.HasPrefix(after, "Z")
 }
 
-// killOnSignal makes Ctrl-C or a kill of a foreground veems take its VM down too.
-func killOnSignal(dir string) func() {
+// onInterrupt runs cleanup and exits if this process is interrupted or told
+// to stop before the returned cancel is called.
+func onInterrupt(cleanup func()) (cancel func()) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	go func() {
 		if _, ok := <-ch; ok {
-			killVMProcs(dir)
+			cleanup()
 			os.Exit(130)
 		}
 	}()

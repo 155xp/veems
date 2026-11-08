@@ -18,9 +18,9 @@ import (
 // the pool back up and exits. With no pool, or an empty one, `veems new`
 // restores a VM as usual.
 //
-// A pooled VM is an ordinary VM with Meta.Pool set and a "pooled" file in its
-// directory. Removing that file is the claim: unlink succeeds for exactly one
-// process.
+// A pooled VM is an ordinary VM with Meta.Pool set and a filePooled marker in
+// its directory. Removing the marker is the claim: unlink succeeds for exactly
+// one process.
 
 // PoolTarget is one pool: how many VMs of one kind to keep ready.
 type PoolTarget struct {
@@ -59,11 +59,7 @@ func savePools(ts []PoolTarget) error {
 	sort.Slice(ts, func(i, j int) bool { return ts[i].key() < ts[j].key() })
 	b, _ := json.MarshalIndent(ts, "", "  ")
 	os.MkdirAll(veemsHome(), 0o755)
-	tmp := poolsFile() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, poolsFile())
+	return writeAtomic(poolsFile(), b, 0o644)
 }
 
 func poolTarget(key string) (PoolTarget, bool) {
@@ -80,7 +76,7 @@ func pooled(key string) []*Meta {
 	vms, _ := listVMs()
 	var out []*Meta
 	for _, m := range vms {
-		if m.Pool != "" && (key == "" || m.Pool == key) && exists(filepath.Join(vmDir(m.ID), "pooled")) {
+		if m.Pool != "" && (key == "" || m.Pool == key) && exists(filepath.Join(vmDir(m.ID), filePooled)) {
 			out = append(out, m)
 		}
 	}
@@ -88,7 +84,7 @@ func pooled(key string) []*Meta {
 }
 
 // take claims a waiting VM so no one else can. False if someone was faster.
-func take(m *Meta) bool { return os.Remove(filepath.Join(vmDir(m.ID), "pooled")) == nil }
+func take(m *Meta) bool { return os.Remove(filepath.Join(vmDir(m.ID), filePooled)) == nil }
 
 // claim hands out a waiting VM that matches o and src, or nil.
 func claim(o NewOpts, src *source) *Meta {
@@ -102,19 +98,11 @@ func claim(o NewOpts, src *source) *Meta {
 			destroy(m.ID) // made from an older image or project
 			continue
 		}
-		m.Pool, m.Name, m.IdleSecs = "", o.Name, int(o.Idle.Seconds())
-		m.Created, m.Deadline = time.Now().UTC(), time.Time{}
-		if o.TTL > 0 {
-			m.Deadline = m.Created.Add(o.TTL)
-		}
+		m.Pool = ""
+		m.limit(o)
 		touch(m.ID)
-		// It has waited a while: check it still answers, then set its clock.
-		a := guestSession(m.ID)
-		err := a.call("guest-ping", nil, nil, 5*time.Second)
-		if err == nil {
-			a.call("guest-set-time", map[string]any{"time": time.Now().UnixNano()}, nil, 5*time.Second)
-		}
-		a.close()
+		// It has waited a while: check that it still answers.
+		err := wake(m.ID, 5*time.Second)
 		if err == nil {
 			err = saveMeta(m)
 		}
@@ -209,12 +197,13 @@ func fillPools(verbose bool) error {
 			}
 		}
 		for n := len(have[key]); n < t.Size; n++ {
-			p := profiles[t.Image]
-			if p == nil {
-				break
-			}
 			start := time.Now()
-			m, err := createVM(NewOpts{OS: p.OS, Desktop: p.Desktop, Project: t.Project, Net: t.Net, Quiet: true, NoPool: true, Pool: key})
+			var m *Meta
+			src, err := poolSource(t)
+			if err == nil {
+				// A waiting VM gets its limits when it is claimed.
+				m, err = startVM(src, NewOpts{Net: t.Net, Pool: key})
+			}
 			if err != nil {
 				say("pool %s: %v", key, err)
 				if firstErr == nil {
@@ -222,7 +211,7 @@ func fillPools(verbose bool) error {
 				}
 				break
 			}
-			if err := os.WriteFile(filepath.Join(vmDir(m.ID), "pooled"), nil, 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(vmDir(m.ID), filePooled), nil, 0o600); err != nil {
 				destroy(m.ID)
 				break
 			}
@@ -253,14 +242,11 @@ func freshenProject(name string, say func(string, ...any)) error {
 }
 
 func poolSource(t PoolTarget) (*source, error) {
-	if t.Project != "" {
-		return projectSource(t.Project)
-	}
 	p := profiles[t.Image]
 	if p == nil {
 		return nil, fmt.Errorf("unknown image %q", t.Image)
 	}
-	return imageSource(p), nil
+	return sourceFor(NewOpts{OS: p.OS, Desktop: p.Desktop, Project: t.Project})
 }
 
 func sortedKeys(m map[string]PoolTarget) []string {
@@ -275,12 +261,8 @@ func sortedKeys(m map[string]PoolTarget) []string {
 // lockPools serializes pool changes and fills across processes.
 func lockPools() (unlock func(), err error) {
 	os.MkdirAll(veemsHome(), 0o755)
-	lock, err := os.OpenFile(filepath.Join(veemsHome(), "pool.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := lockFile(filepath.Join(veemsHome(), "pool.lock"), true)
 	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		lock.Close()
 		return nil, err
 	}
 	return func() { lock.Close() }, nil

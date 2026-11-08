@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -77,13 +76,9 @@ type agentConn struct {
 func guestSession(id string) *agentConn { return &agentConn{dir: vmDir(id), id: id} }
 
 func (a *agentConn) dial() error {
-	lock, err := os.OpenFile(filepath.Join(a.dir, "qga.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := lockFile(filepath.Join(a.dir, "qga.lock"), true)
 	if err != nil {
 		return fmt.Errorf("vm not found: %s", filepath.Base(a.dir))
-	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		lock.Close()
-		return err
 	}
 	// Through the supervisor's proxy when there is one (see agentProxy).
 	sock := filepath.Join(a.dir, "agent.sock")
@@ -263,54 +258,5 @@ func lend(cl, qga net.Conn) bool {
 // touch records activity so the idle reaper leaves the VM alone.
 func touch(id string) {
 	now := time.Now()
-	os.Chtimes(filepath.Join(vmDir(id), "activity"), now, now)
-}
-
-func guestPing(id string, timeout time.Duration) error {
-	return guestCall(id, "guest-ping", nil, nil, timeout)
-}
-
-// qmp sends one command to QEMU's monitor.
-func qmp(dir, cmd string, args any, timeout time.Duration) (json.RawMessage, error) {
-	c, err := net.DialTimeout("unix", filepath.Join(dir, "qmp.sock"), 3*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	defer c.Close()
-	c.SetDeadline(time.Now().Add(timeout))
-	dec := json.NewDecoder(c)
-	var greet map[string]any
-	if err := dec.Decode(&greet); err != nil {
-		return nil, err
-	}
-	send := func(cmd string, args any) (json.RawMessage, error) {
-		m := map[string]any{"execute": cmd}
-		if args != nil {
-			m["arguments"] = args
-		}
-		b, _ := json.Marshal(m)
-		if _, err := c.Write(b); err != nil {
-			return nil, err
-		}
-		for {
-			var r struct {
-				reply
-				Event string `json:"event"`
-			}
-			if err := dec.Decode(&r); err != nil {
-				return nil, err
-			}
-			if r.Event != "" {
-				continue
-			}
-			if r.Error != nil {
-				return nil, r.Error
-			}
-			return r.Return, nil
-		}
-	}
-	if _, err := send("qmp_capabilities", nil); err != nil {
-		return nil, err
-	}
-	return send(cmd, args)
+	os.Chtimes(filepath.Join(vmDir(id), fileActivity), now, now)
 }

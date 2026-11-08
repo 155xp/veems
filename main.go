@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -251,6 +250,10 @@ func newOpts(f *flags, osName string) (NewOpts, error) {
 	return o, nil
 }
 
+func logf(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "veems: "+format+"\n", a...)
+}
+
 func printJSON(v any) {
 	b, _ := json.MarshalIndent(v, "", "  ")
 	fmt.Println(string(b))
@@ -270,7 +273,7 @@ func cmdNew(args []string) error {
 		return err
 	}
 	start := time.Now()
-	m, err := createVM(o)
+	m, err := newVM(o)
 	if err != nil {
 		return err
 	}
@@ -433,8 +436,7 @@ func cmdRun(args []string) (int, error) {
 	if err != nil {
 		return 2, err
 	}
-	no.Quiet = true
-	m, err := createVM(no)
+	m, err := newVM(no)
 	if err != nil {
 		return 1, err
 	}
@@ -442,6 +444,7 @@ func cmdRun(args []string) (int, error) {
 		fmt.Fprintln(os.Stderr, "veems: vm", m.ID, "kept running")
 	} else {
 		defer destroy(m.ID)
+		defer onInterrupt(func() { destroy(m.ID) })()
 	}
 	for _, spec := range f.vals["push"] {
 		local, remote, _ := strings.Cut(spec, ":")
@@ -516,25 +519,11 @@ func cmdLs(args []string) error {
 }
 
 func stopsIn(m *Meta) string {
-	left := time.Duration(-1)
-	if !m.Deadline.IsZero() {
-		left = time.Until(m.Deadline)
-	}
-	if m.IdleSecs > 0 {
-		if st, err := os.Stat(filepath.Join(vmDir(m.ID), "activity")); err == nil {
-			idle := time.Duration(m.IdleSecs)*time.Second - time.Since(st.ModTime())
-			if left < 0 || idle < left {
-				left = idle
-			}
-		}
-	}
-	if left < 0 && m.Deadline.IsZero() && m.IdleSecs == 0 {
+	t, ok := m.stopsAt()
+	if !ok {
 		return "never"
 	}
-	if left < 0 {
-		left = 0
-	}
-	return left.Round(time.Second).String()
+	return max(time.Until(t), 0).Round(time.Second).String()
 }
 
 func cmdRm(args []string) error {
@@ -796,10 +785,7 @@ func cmdDoctor() error {
 	check("unprivileged sandbox (bwrap)", err, "allow unprivileged user namespaces (kernel.unprivileged_userns_clone=1)")
 	for _, key := range []string{"linux", "windows", "linux-desktop", "windows-desktop"} {
 		p := profiles[key]
-		fix := "veems build " + p.OS
-		if p.Desktop {
-			fix += " --desktop"
-		}
+		fix := p.buildCmd()
 		var err error
 		switch {
 		case !exists(basePath(key)) && p.Desktop:

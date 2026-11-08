@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -64,17 +62,6 @@ func loadProject(name string) (*Project, error) {
 	return &p, nil
 }
 
-// stamp identifies one saved snapshot. Rebuilding an image or re-preparing a
-// project writes a new state file, so the stamp changes and anything made
-// from the old one (projects, pooled VMs) is known to be stale.
-func stamp(file string) string {
-	st, err := os.Stat(file)
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%d.%d", st.Size(), st.ModTime().UnixNano())
-}
-
 // stale says why a project can no longer be used as is, or "".
 func (p *Project) stale() string {
 	switch snap := readSnap(p.Image); {
@@ -125,9 +112,25 @@ func projectSource(name string) (*source, error) {
 	if p == nil {
 		return nil, fmt.Errorf("project %s: unknown image %q", name, pj.Image)
 	}
+	s := projectFiles(p, name)
+	s.snap = &snapInfo{QEMU: pj.QEMU, CPUs: pj.CPUs, MemMB: pj.MemMB}
+	return s, nil
+}
+
+func projectFiles(p *Profile, name string) *source {
 	return &source{prof: p, project: name, disk: projDisk(name), state: projState(name),
-		snap:  &snapInfo{QEMU: pj.QEMU, CPUs: pj.CPUs, MemMB: pj.MemMB},
-		binds: []string{imageDir(p.Key), projectDir(name)}}, nil
+		binds: []string{imageDir(p.Key), projectDir(name)}}
+}
+
+// cold is s for a VM that boots instead of restoring. An image snapshot's
+// disk only goes with its RAM state, so that VM boots from the base disk.
+func (s *source) cold() *source {
+	c := *s
+	c.snap, c.state = nil, ""
+	if c.project == "" {
+		c.disk = basePath(c.prof.Key)
+	}
+	return &c
 }
 
 // sourceFor finds what o asks to start from.
@@ -149,11 +152,7 @@ func sourceFor(o NewOpts) (*source, error) {
 		return nil, err
 	}
 	if !exists(basePath(p.Key)) {
-		flag := ""
-		if p.Desktop {
-			flag = " --desktop"
-		}
-		return nil, fmt.Errorf("no %s image yet: run `veems build %s%s` once", p.Key, p.OS, flag)
+		return nil, fmt.Errorf("no %s image yet: run `%s` once", p.Key, p.buildCmd())
 	}
 	return imageSource(p), nil
 }
@@ -162,10 +161,9 @@ func sourceFor(o NewOpts) (*source, error) {
 func metaSource(m *Meta) *source {
 	p := metaProfile(m)
 	if m.Project != "" {
-		return &source{prof: p, project: m.Project, disk: projDisk(m.Project), state: projState(m.Project),
-			binds: []string{imageDir(p.Key), projectDir(m.Project)}}
+		return projectFiles(p, m.Project)
 	}
-	return &source{prof: p, disk: tmplDisk(p.Key), state: tmplState(p.Key), binds: []string{imageDir(p.Key)}}
+	return imageSource(p)
 }
 
 type PrepOpts struct {
@@ -195,21 +193,22 @@ func prepare(o PrepOpts) (*Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	snap := readSnap(p.Key)
-	if snap == nil || snap.QEMU != qemuVersion() {
-		return nil, fmt.Errorf("the %s image needs a current snapshot first: `veems build %s --snapshot`", p.Key, p.OS)
+	src, err := sourceFor(NewOpts{OS: p.OS, Desktop: p.Desktop})
+	if err != nil {
+		return nil, err
+	}
+	snap := src.snap
+	if !snap.current() {
+		return nil, fmt.Errorf("the %s image needs a current snapshot first: `%s --snapshot`", p.Key, p.buildCmd())
 	}
 	if err := os.MkdirAll(projectsDir(), 0o755); err != nil {
 		return nil, err
 	}
-	lock, err := os.OpenFile(filepath.Join(projectsDir(), "."+o.Name+".lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := lockFile(filepath.Join(projectsDir(), "."+o.Name+".lock"), false)
 	if err != nil {
-		return nil, err
-	}
-	defer lock.Close()
-	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 		return nil, fmt.Errorf("project %s is already being prepared", o.Name)
 	}
+	defer lock.Close()
 	if o.Src != "" {
 		if o.Src, err = filepath.Abs(o.Src); err != nil {
 			return nil, err
@@ -228,20 +227,13 @@ func prepare(o PrepOpts) (*Project, error) {
 	}
 	start := time.Now()
 
-	m, err := createVM(NewOpts{OS: p.OS, Desktop: p.Desktop, Name: "prep-" + o.Name, Net: pj.Net, NetHub: true, Quiet: true, NoPool: true})
+	// The idle limit only matters if this process dies: every exec counts as activity.
+	m, err := startVM(src, NewOpts{Name: "prep-" + o.Name, Net: pj.Net, NetHub: true, Idle: 20 * time.Minute})
 	if err != nil {
 		return nil, err
 	}
 	defer destroy(m.ID)
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(sig)
-	go func() {
-		if _, ok := <-sig; ok {
-			destroy(m.ID)
-			os.Exit(130)
-		}
-	}()
+	defer onInterrupt(func() { destroy(m.ID) })()
 	logf("preparing %s in %s", o.Name, m.ID)
 
 	step := func(what string, eo ExecOpts) error {
@@ -264,13 +256,7 @@ func prepare(o PrepOpts) (*Project, error) {
 		return nil
 	}
 	if o.Git != "" {
-		var err error
-		if p.OS == "windows" {
-			err = step("git clone "+o.Git, ExecOpts{Cwd: `C:\`, Argv: gitArgs("git", o.Git, o.Ref, o.Dest)})
-		} else {
-			err = step("git clone "+o.Git, ExecOpts{Cwd: "/", Argv: []string{"/bin/sh", "-c", gitScript, "veems", o.Git, o.Ref, o.Dest}})
-		}
-		if err != nil {
+		if err := step("git clone "+o.Git, p.guest().gitClone(o.Git, o.Ref, o.Dest)); err != nil {
 			return nil, err
 		}
 	}
@@ -340,19 +326,6 @@ func prepare(o PrepOpts) (*Project, error) {
 	return pj, nil
 }
 
-// gitScript clones $1 at ref $2 (default branch if empty) into $3, shallow.
-const gitScript = `set -e
-if [ -z "$2" ]; then exec git clone -q --depth 1 -- "$1" "$3"; fi
-git init -q "$3"; cd "$3"; git remote add origin "$1"
-git fetch -q --depth 1 origin "$2"; git checkout -q FETCH_HEAD`
-
-func gitArgs(git, url, ref, dest string) []string {
-	if ref == "" {
-		return []string{git, "clone", "-q", "--depth", "1", "--", url, dest}
-	}
-	return []string{git, "clone", "-q", "--branch", ref, "--depth", "1", "--", url, dest}
-}
-
 func defaultDest(p *Profile, o PrepOpts) string {
 	base := ""
 	switch {
@@ -364,10 +337,8 @@ func defaultDest(p *Profile, o PrepOpts) string {
 	if base == "" || base == "." || base == "/" || strings.ContainsAny(base, `:`) {
 		base = o.Name
 	}
-	if p.OS == "windows" {
-		return p.WorkDir + `\` + base
-	}
-	return path.Join(p.WorkDir, base)
+	g := p.guest()
+	return g.join(g.workDir(), base)
 }
 
 // saveState pauses a VM and writes its RAM and device state to file. Pausing

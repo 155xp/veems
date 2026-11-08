@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Profile describes one image variant: its defaults and where it lives.
@@ -15,16 +17,19 @@ type Profile struct {
 	Prefix  string // id prefix
 	CPUs    int
 	MemMB   int
-	WorkDir string // default cwd and default copy target inside the guest
 	DiskGB  int
-	Boot    int // seconds to wait for a cold boot
+	Boot    time.Duration // longest a cold boot may take
+	// How long a freshly booted guest is left alone before its snapshot, so
+	// first-boot work (Windows' .NET and services, a desktop logging in) is
+	// done and clones start idle.
+	Settle time.Duration
 }
 
 var profiles = map[string]*Profile{
-	"linux":           {Key: "linux", OS: "linux", Prefix: "lnx", CPUs: 2, MemMB: 1024, WorkDir: "/work", DiskGB: 16, Boot: 180},
-	"windows":         {Key: "windows", OS: "windows", Prefix: "win", CPUs: 2, MemMB: 2048, WorkDir: `C:\work`, DiskGB: 40, Boot: 600},
-	"linux-desktop":   {Key: "linux-desktop", OS: "linux", Desktop: true, Prefix: "lnxd", CPUs: 2, MemMB: 2048, WorkDir: "/work", DiskGB: 20, Boot: 240},
-	"windows-desktop": {Key: "windows-desktop", OS: "windows", Desktop: true, Prefix: "wind", CPUs: 2, MemMB: 4096, WorkDir: `C:\work`, DiskGB: 48, Boot: 900},
+	"linux":           {Key: "linux", OS: "linux", Prefix: "lnx", CPUs: 2, MemMB: 1024, DiskGB: 16, Boot: 3 * time.Minute, Settle: 5 * time.Second},
+	"windows":         {Key: "windows", OS: "windows", Prefix: "win", CPUs: 2, MemMB: 2048, DiskGB: 40, Boot: 10 * time.Minute, Settle: 3 * time.Minute},
+	"linux-desktop":   {Key: "linux-desktop", OS: "linux", Desktop: true, Prefix: "lnxd", CPUs: 2, MemMB: 2048, DiskGB: 20, Boot: 4 * time.Minute, Settle: 40 * time.Second},
+	"windows-desktop": {Key: "windows-desktop", OS: "windows", Desktop: true, Prefix: "wind", CPUs: 2, MemMB: 4096, DiskGB: 48, Boot: 15 * time.Minute, Settle: 3 * time.Minute},
 }
 
 // profile resolves an OS name, plus --desktop, to an image variant.
@@ -44,6 +49,14 @@ func profile(name string, desktop bool) (*Profile, error) {
 		return nil, fmt.Errorf("unknown os %q (use linux or windows, optionally with --desktop)", name)
 	}
 	return p, nil
+}
+
+// buildCmd is the command that builds this image.
+func (p *Profile) buildCmd() string {
+	if p.Desktop {
+		return "veems build " + p.OS + " --desktop"
+	}
+	return "veems build " + p.OS
 }
 
 func metaProfile(m *Meta) *Profile {
@@ -74,3 +87,46 @@ func tmplState(key string) string { return filepath.Join(imageDir(key), "snap.st
 func tmplMeta(key string) string  { return filepath.Join(imageDir(key), "snap.json") }
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+// stamp identifies one saved snapshot. Rebuilding an image or re-preparing a
+// project writes a new state file, so the stamp changes and anything made
+// from the old one (projects, pooled VMs) is known to be stale.
+func stamp(file string) string {
+	st, err := os.Stat(file)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%d.%d", st.Size(), st.ModTime().UnixNano())
+}
+
+// writeAtomic replaces path with data, so readers see the old or the new
+// file, never part of one.
+func writeAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := fmt.Sprintf("%s.%d.tmp", path, os.Getpid())
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// lockFile takes an exclusive lock on path, waiting for it or failing at
+// once. Closing the file releases it.
+func lockFile(path string, wait bool) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	how := syscall.LOCK_EX
+	if !wait {
+		how |= syscall.LOCK_NB
+	}
+	if err := syscall.Flock(int(f.Fd()), how); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
+}
