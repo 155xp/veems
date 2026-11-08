@@ -107,7 +107,14 @@ setsid -f runuser -u agent -- env DISPLAY=:0 XAUTHORITY=/home/agent/.Xauthority 
 	return r
 }
 
-// Dropping the page cache keeps the snapshot, and so every restore, small.
-func (linuxGuest) beforeSnapshot(a *agentConn) {
+// beforeSnapshot drops the page cache, which keeps the snapshot (and every
+// restore) small, then runs a command so the files every exec needs are the
+// ones left in it.
+func (g linuxGuest) beforeSnapshot(a *agentConn) {
 	a.run(guestProc{Path: "/bin/sh", Args: []string{"-c", "sync; echo 3 > /proc/sys/vm/drop_caches"}}, 10*time.Second)
+	for i := 0; i < 2; i++ {
+		if p, err := g.proc(a, ExecOpts{Line: "true"}); err == nil {
+			a.run(p, 10*time.Second)
+		}
+	}
 }
