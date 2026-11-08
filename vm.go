@@ -163,6 +163,7 @@ func startVM(src *source, o NewOpts) (*Meta, error) {
 		return nil, err
 	}
 	fail := func(err error) (*Meta, error) { os.RemoveAll(dir); return nil, err }
+	defer onInterrupt(func() { destroy(m.ID) })()
 	if err := qemuImgCreate(filepath.Join(dir, "disk.qcow2"), src.disk, 0); err != nil {
 		return fail(err)
 	}

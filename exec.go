@@ -103,6 +103,11 @@ func guestExec(m *Meta, o ExecOpts) (*ExecResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer onInterrupt(func() {
+		k := guestSession(m.ID)
+		k.run(m.guest().killTree(pid), 3*time.Second)
+		k.close()
+	})()
 	var deadline time.Time
 	if o.Timeout > 0 {
 		deadline = time.Now().Add(o.Timeout)
@@ -112,15 +117,16 @@ func guestExec(m *Meta, o ExecOpts) (*ExecResult, error) {
 		return nil, err
 	}
 	if st == nil {
-		killGuestTree(a, m, pid)
-		return &ExecResult{ExitCode: 124, TimedOut: true}, nil
+		// Whatever the command printed before it was killed is still worth having.
+		a.run(m.guest().killTree(pid), 3*time.Second)
+		r := &ExecResult{ExitCode: 124, TimedOut: true}
+		if st, _ := a.wait(pid, time.Now().Add(5*time.Second)); st != nil {
+			out := st.result()
+			r.Stdout, r.Stderr, r.Truncated = out.Stdout, out.Stderr, out.Truncated
+		}
+		return r, nil
 	}
 	return st.result(), nil
-}
-
-func killGuestTree(a *agentConn, m *Meta, pid int) {
-	a.run(m.guest().killTree(pid), 3*time.Second)
-	a.call("guest-exec-status", map[string]any{"pid": pid}, &execStatus{}, 10*time.Second) // the agent keeps an exited process until its status is read
 }
 
 func mustExec(m *Meta, o ExecOpts) (string, error) {
