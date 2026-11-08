@@ -82,34 +82,68 @@ func pooled(key string) []*Meta {
 	return out
 }
 
-// take claims a waiting VM so no one else can. False if someone was faster.
-func take(m *Meta) bool { return os.Remove(filepath.Join(vmDir(m.ID), filePooled)) == nil }
+// take claims a waiting VM so no one else can, or returns nil if someone was
+// faster. The claim lock is held until release, so a claimer that dies
+// half-way leaves a VM that sweepAbandoned can tell from one being claimed.
+func take(m *Meta) (release func()) {
+	lock, err := lockFile(filepath.Join(vmDir(m.ID), "claim.lock"), false)
+	if err != nil {
+		return nil
+	}
+	if os.Remove(filepath.Join(vmDir(m.ID), filePooled)) != nil {
+		lock.Close()
+		return nil
+	}
+	return func() { lock.Close() }
+}
+
+// sweepAbandoned removes VMs that a claim or a fill left half-way: in no
+// pool any more, yet with no limits and hidden from `ls`.
+func sweepAbandoned(say func(string, ...any)) {
+	vms, _ := listVMs()
+	for _, m := range vms {
+		if m.Pool == "" || exists(filepath.Join(vmDir(m.ID), filePooled)) {
+			continue
+		}
+		lock, err := lockFile(filepath.Join(vmDir(m.ID), "claim.lock"), false)
+		if err != nil {
+			continue // being claimed right now
+		}
+		if cur, err := loadMeta(m.ID); err == nil && cur.Pool != "" && !exists(filepath.Join(vmDir(m.ID), filePooled)) {
+			say("removing abandoned pooled vm %s", m.ID)
+			destroy(m.ID)
+		}
+		lock.Close()
+	}
+}
 
 func claim(o NewOpts, src *source) *Meta {
 	key := poolKey(src.prof.Key, src.project, o.Net)
 	want := src.stamp()
 	for _, m := range pooled(key) {
-		if (o.CPUs != 0 && o.CPUs != m.CPUs) || (o.MemMB != 0 && o.MemMB != m.MemMB) || !take(m) {
+		if (o.CPUs != 0 && o.CPUs != m.CPUs) || (o.MemMB != 0 && o.MemMB != m.MemMB) {
 			continue
 		}
-		if m.Source != want {
+		release := take(m)
+		if release == nil {
+			continue
+		}
+		ok := m.Source == want
+		if ok {
+			m.Pool = ""
+			m.limit(o)
+			touch(m.ID)
+			// It has waited a while: check that it still answers.
+			ok = wake(m.ID, 5*time.Second) == nil && saveMeta(m) == nil
+		}
+		if !ok {
 			destroy(m.ID)
-			continue
 		}
-		m.Pool = ""
-		m.limit(o)
-		touch(m.ID)
-		// It has waited a while: check that it still answers.
-		err := wake(m.ID, 5*time.Second)
-		if err == nil {
-			err = saveMeta(m)
+		release()
+		if ok {
+			m.Pooled = true
+			return m
 		}
-		if err != nil {
-			destroy(m.ID)
-			continue
-		}
-		m.Pooled = true
-		return m
 	}
 	return nil
 }
@@ -150,6 +184,7 @@ func fillPools(verbose bool) error {
 			fmt.Fprintf(os.Stderr, "%s veems: "+format+"\n", append([]any{time.Now().Format(time.RFC3339)}, a...)...)
 		}
 	}
+	sweepAbandoned(say)
 	targets := map[string]PoolTarget{}
 	for _, t := range loadPools() {
 		targets[t.key()] = t
@@ -158,16 +193,18 @@ func fillPools(verbose bool) error {
 	for _, m := range pooled("") {
 		t, ok := targets[m.Pool]
 		if !ok {
-			if take(m) {
+			if release := take(m); release != nil {
 				destroy(m.ID)
+				release()
 			}
 			continue
 		}
 		src, err := poolSource(t)
 		if err != nil || m.Source != src.stamp() {
-			if take(m) {
+			if release := take(m); release != nil {
 				say("removing stale pooled vm %s", m.ID)
 				destroy(m.ID)
+				release()
 			}
 			continue
 		}
@@ -179,8 +216,9 @@ func fillPools(verbose bool) error {
 		for len(have[key]) > t.Size {
 			m := have[key][len(have[key])-1]
 			have[key] = have[key][:len(have[key])-1]
-			if take(m) {
+			if release := take(m); release != nil {
 				destroy(m.ID)
+				release()
 			}
 		}
 		if t.Project != "" && len(have[key]) < t.Size {

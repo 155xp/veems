@@ -125,7 +125,7 @@ func TestTakeIsExclusive(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if take(m) {
+			if take(m) != nil {
 				wins.Add(1)
 			}
 		}()
@@ -274,5 +274,26 @@ func TestNetworkIsDetachable(t *testing.T) {
 	}
 	if strings.Contains(off, "user,") {
 		t.Fatalf("offline VM has a user-mode network: %s", off)
+	}
+}
+
+func TestSweepAbandonedClaims(t *testing.T) {
+	tempHome(t)
+	fakePooled(t, "lnx-dead01", "linux", "s")
+	fakePooled(t, "lnx-busy01", "linux", "s")
+	fakePooled(t, "lnx-wait01", "linux", "s")
+	dead := take(&Meta{ID: "lnx-dead01"})
+	dead() // the claimer died after taking it
+	busy := take(&Meta{ID: "lnx-busy01"})
+	defer busy() // still being claimed
+	sweepAbandoned(func(string, ...any) {})
+	if exists(vmDir("lnx-dead01")) {
+		t.Error("abandoned claim was not removed")
+	}
+	if !exists(vmDir("lnx-busy01")) {
+		t.Error("a claim in progress was removed")
+	}
+	if !exists(vmDir("lnx-wait01")) {
+		t.Error("a waiting vm was removed")
 	}
 }
