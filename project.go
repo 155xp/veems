@@ -75,97 +75,6 @@ func (p *Project) stale() string {
 	return ""
 }
 
-// source is what a new VM starts from: an image's snapshot or a project's.
-type source struct {
-	prof    *Profile
-	project string
-	disk    string    // backing disk for the VM's copy-on-write layer
-	state   string    // saved RAM and device state
-	snap    *snapInfo // nil: no usable state, cold boot from disk
-	binds   []string  // read-only directories QEMU needs
-}
-
-func (s *source) stamp() string {
-	if s.snap == nil {
-		return stamp(s.disk)
-	}
-	return stamp(s.state)
-}
-
-func imageSource(p *Profile) *source {
-	s := &source{prof: p, disk: basePath(p.Key), binds: []string{imageDir(p.Key)}}
-	if snap := readSnap(p.Key); snap != nil {
-		s.disk, s.state, s.snap = tmplDisk(p.Key), tmplState(p.Key), snap
-	}
-	return s
-}
-
-func projectSource(name string) (*source, error) {
-	pj, err := loadProject(name)
-	if err != nil {
-		return nil, err
-	}
-	if why := pj.stale(); why != "" {
-		return nil, fmt.Errorf("project %s is out of date (%s): run `veems project refresh %s`", name, why, name)
-	}
-	p := profiles[pj.Image]
-	if p == nil {
-		return nil, fmt.Errorf("project %s: unknown image %q", name, pj.Image)
-	}
-	s := projectFiles(p, name)
-	s.snap = &snapInfo{QEMU: pj.QEMU, CPUs: pj.CPUs, MemMB: pj.MemMB}
-	return s, nil
-}
-
-func projectFiles(p *Profile, name string) *source {
-	return &source{prof: p, project: name, disk: projDisk(name), state: projState(name),
-		binds: []string{imageDir(p.Key), projectDir(name)}}
-}
-
-// cold is s for a VM that boots instead of restoring. An image snapshot's
-// disk only goes with its RAM state, so that VM boots from the base disk.
-func (s *source) cold() *source {
-	c := *s
-	c.snap, c.state = nil, ""
-	if c.project == "" {
-		c.disk = basePath(c.prof.Key)
-	}
-	return &c
-}
-
-// sourceFor finds what o asks to start from.
-func sourceFor(o NewOpts) (*source, error) {
-	if o.Project != "" {
-		s, err := projectSource(o.Project)
-		if err != nil {
-			return nil, err
-		}
-		if o.OS != "" {
-			if p, err := profile(o.OS, o.Desktop); err != nil || p.Key != s.prof.Key {
-				return nil, fmt.Errorf("project %s is a %s project", o.Project, s.prof.Key)
-			}
-		}
-		return s, nil
-	}
-	p, err := profile(o.OS, o.Desktop)
-	if err != nil {
-		return nil, err
-	}
-	if !exists(basePath(p.Key)) {
-		return nil, fmt.Errorf("no %s image yet: run `%s` once", p.Key, p.buildCmd())
-	}
-	return imageSource(p), nil
-}
-
-// metaSource is the source a running VM was created from.
-func metaSource(m *Meta) *source {
-	p := metaProfile(m)
-	if m.Project != "" {
-		return projectFiles(p, m.Project)
-	}
-	return imageSource(p)
-}
-
 type PrepOpts struct {
 	Name    string
 	OS      string
@@ -339,35 +248,6 @@ func defaultDest(p *Profile, o PrepOpts) string {
 	}
 	g := p.guest()
 	return g.join(g.workDir(), base)
-}
-
-// saveState pauses a VM and writes its RAM and device state to file. Pausing
-// flushes the disk, so the disk and the state match.
-func saveState(dir, file string) error {
-	if _, err := qmp(dir, "stop", nil, 30*time.Second); err != nil {
-		return fmt.Errorf("pausing vm: %w", err)
-	}
-	if _, err := qmp(dir, "migrate", map[string]any{"uri": "file:" + file}, 30*time.Second); err != nil {
-		return fmt.Errorf("saving vm state: %w", err)
-	}
-	for {
-		raw, err := qmp(dir, "query-migrate", nil, 10*time.Second)
-		if err != nil {
-			return err
-		}
-		var st struct {
-			Status string `json:"status"`
-			Error  string `json:"error-desc"`
-		}
-		json.Unmarshal(raw, &st)
-		switch st.Status {
-		case "completed":
-			return nil
-		case "failed", "cancelled":
-			return fmt.Errorf("saving vm state: %s %s", st.Status, st.Error)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
 }
 
 func listProjects() []*Project {

@@ -99,9 +99,11 @@ func TestAgentProxyKeepsTheGuestConnection(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 5; j++ {
-				if err := agentCall(dir, "guest-ping", nil, nil, 2*time.Second); err != nil {
+				a := &agentConn{dir: dir}
+				if err := a.call("guest-ping", nil, nil, 2*time.Second); err != nil {
 					t.Error(err)
 				}
+				a.close()
 			}
 		}()
 	}

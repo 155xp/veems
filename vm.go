@@ -86,32 +86,6 @@ type NewOpts struct {
 	Pool    string // start a VM for this pool
 }
 
-type snapInfo struct {
-	QEMU  string `json:"qemu"`
-	CPUs  int    `json:"cpus"`
-	MemMB int    `json:"mem_mb"`
-}
-
-func readSnap(key string) *snapInfo {
-	b, err := os.ReadFile(tmplMeta(key))
-	if err != nil || !exists(tmplState(key)) || !exists(tmplDisk(key)) {
-		return nil
-	}
-	var s snapInfo
-	if json.Unmarshal(b, &s) != nil {
-		return nil
-	}
-	return &s
-}
-
-// current says whether this QEMU can restore the snapshot.
-func (s *snapInfo) current() bool { return s != nil && s.QEMU == qemuVersion() }
-
-// fits says whether a VM with cpus and memMB can restore the snapshot.
-func (s *snapInfo) fits(cpus, memMB int) bool {
-	return s.current() && s.CPUs == cpus && s.MemMB == memMB
-}
-
 // newVM hands out a VM: a waiting one from a pool if one fits, else a fresh
 // restore. Either way the pool is topped up afterwards.
 func newVM(o NewOpts) (*Meta, error) {
