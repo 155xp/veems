@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -59,15 +60,17 @@ func (g linuxGuest) abs(p string) string {
 
 func (linuxGuest) base(p string) string         { return path.Base(p) }
 func (linuxGuest) join(dir, name string) string { return path.Join(dir, name) }
-func (linuxGuest) temp(ext string) string       { return tempName("/tmp", "/", ext) }
+func (linuxGuest) temp(ext string) string       { return tempName("/var/tmp", "/", ext) } // /tmp is in RAM
 func (linuxGuest) readChunk() int               { return 4 << 20 }
 
 func sh(script string, args ...string) ExecOpts {
 	return ExecOpts{Cwd: "/", Argv: append([]string{"/bin/sh", "-c", script, "veems"}, args...)}
 }
 
-func (linuxGuest) prepTarget(dst string) ExecOpts {
-	return sh(`if [ -d "$1" ]; then echo dir; else mkdir -p -- "$(dirname -- "$1")" && echo file; fi`, dst)
+func (linuxGuest) prepTarget(dst, name string, mode os.FileMode) ExecOpts {
+	return sh(`t=$1; if [ -d "$t" ]; then t=$t/$2; else mkdir -p -- "$(dirname -- "$t")" || exit 1; fi
+[ -d "$t" ] && { echo "$t is a directory" >&2; exit 1; }
+: >"$t" && chmod "$3" "$t" && printf '%s' "$t"`, dst, name, fmt.Sprintf("%o", mode.Perm()))
 }
 
 func (linuxGuest) packIfDir(src, tar string) ExecOpts {

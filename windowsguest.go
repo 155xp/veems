@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -80,8 +81,8 @@ func (windowsGuest) readChunk() int { return 256 << 10 }
 
 func ps(line string) ExecOpts { return ExecOpts{Cwd: `C:\`, Line: line} }
 
-func (windowsGuest) prepTarget(dst string) ExecOpts {
-	return ps(fmt.Sprintf(`$p=%s; if (Test-Path -LiteralPath $p -PathType Container) { 'dir' } else { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p) | Out-Null; 'file' }`, psQuote(dst)))
+func (windowsGuest) prepTarget(dst, name string, _ os.FileMode) ExecOpts {
+	return ps(fmt.Sprintf(`$p=%s; if (Test-Path -LiteralPath $p -PathType Container) { $p = Join-Path $p %s } else { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p) | Out-Null }; $p`, psQuote(dst), psQuote(name)))
 }
 
 func (windowsGuest) packIfDir(src, tar string) ExecOpts {

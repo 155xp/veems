@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -21,7 +22,9 @@ type guestOS interface {
 	temp(ext string) string
 	readChunk() int // bytes per guest-file-read
 
-	prepTarget(dst string) ExecOpts     // makes dst's parent; prints "dir" if dst is a directory, else "file"
+	// prepTarget creates the file a copy of name to dst writes (inside dst
+	// if that is a directory) with mode, and prints its path.
+	prepTarget(dst, name string, mode os.FileMode) ExecOpts
 	packIfDir(src, tar string) ExecOpts // prints "dir" after tarring src into tar, or "file"; fails if src is missing
 	unpack(tar, dst string) ExecOpts
 	remove(p string) ExecOpts

@@ -103,23 +103,20 @@ func push(m *Meta, src, dst string) error {
 		if trailing {
 			dst = g.join(dst, filepath.Base(src))
 		}
-		out, err := mustExec(m, g.prepTarget(dst))
+		out, err := mustExec(m, g.prepTarget(dst, filepath.Base(src), st.Mode()))
 		if err != nil {
 			return err
 		}
-		if strings.TrimSpace(out) == "dir" {
-			dst = g.join(dst, filepath.Base(src))
-		}
-		return writeGuest(m, dst, f)
+		return writeGuest(m, strings.TrimSpace(out), f)
 	}
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(writeTar(pw, src)) }()
 	tmp := g.temp(".tar")
+	defer guestExec(m, g.remove(tmp))
 	if err := writeGuest(m, tmp, pr); err != nil {
 		pr.CloseWithError(err)
 		return err
 	}
-	defer guestExec(m, g.remove(tmp))
 	_, err = mustExec(m, g.unpack(tmp, dst))
 	return err
 }
