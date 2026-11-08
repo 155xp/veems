@@ -242,7 +242,7 @@ func safeUntar(r io.Reader, dst string) error {
 			return err
 		}
 		name := filepath.FromSlash(strings.ReplaceAll(hdr.Name, `\`, "/"))
-		if filepath.IsAbs(name) || strings.HasPrefix(name, "..") {
+		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(os.PathSeparator)) {
 			return fmt.Errorf("refusing unsafe path %q from guest", hdr.Name)
 		}
 		target := filepath.Join(dst, name)
