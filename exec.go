@@ -17,11 +17,11 @@ type ExecOpts struct {
 }
 
 type ExecResult struct {
-	ExitCode  int    `json:"exit_code"`
-	Stdout    []byte `json:"-"`
-	Stderr    []byte `json:"-"`
-	TimedOut  bool   `json:"timed_out,omitempty"`
-	Truncated bool   `json:"truncated,omitempty"`
+	ExitCode  int
+	Stdout    []byte
+	Stderr    []byte
+	TimedOut  bool
+	Truncated bool
 }
 
 type execStatus struct {
@@ -34,63 +34,60 @@ type execStatus struct {
 	ErrTruncated bool   `json:"err-truncated"`
 }
 
-const linuxPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-// psQuote makes a PowerShell single-quoted string literal.
-func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
-
-// guestCommand turns ExecOpts into the program, arguments, and environment
-// handed to the guest agent.
-func guestCommand(m *Meta, o ExecOpts) (path string, args, env []string) {
-	p := metaProfile(m)
-	cwd := o.Cwd
-	if cwd == "" {
-		cwd = p.WorkDir
+func (st *execStatus) result() *ExecResult {
+	r := &ExecResult{Truncated: st.OutTruncated || st.ErrTruncated}
+	r.Stdout, _ = base64.StdEncoding.DecodeString(st.OutData)
+	r.Stderr, _ = base64.StdEncoding.DecodeString(st.ErrData)
+	switch {
+	case st.ExitCode != nil:
+		r.ExitCode = *st.ExitCode
+	case st.Signal != nil:
+		r.ExitCode = 128 + *st.Signal
 	}
-	if m.OS == "windows" {
-		return "powershell.exe", nil, nil // script set up by guestExec
-	}
-	env = []string{"HOME=/root", "USER=root", "PATH=" + linuxPath, "LANG=C.UTF-8", "TERM=dumb"}
-	if m.Desktop { // so xdotool, wmctrl, and friends reach the desktop
-		env = append(env, "DISPLAY=:0", "XAUTHORITY=/home/agent/.Xauthority")
-	}
-	env = append(env, o.Env...)
-	cmd := o.Argv
-	if o.Line != "" {
-		cmd = []string{"/bin/bash", "-c", o.Line}
-	}
-	args = append([]string{"-c", `cd -- "$1" || exit 125; shift; exec "$@"`, "veems", cwd}, cmd...)
-	return "/bin/sh", args, env
+	return r
 }
 
-// psScript wraps a Windows command so errors print as plain text and, like
-// bash, the last command decides the exit code: 0 if it succeeded, else the
-// native program's exit code, or 1 for a failed cmdlet.
-func psScript(m *Meta, o ExecOpts) string {
-	p := metaProfile(m)
-	cwd := o.Cwd
-	if cwd == "" {
-		cwd = p.WorkDir
+// start starts p in the guest and returns its pid.
+func (a *agentConn) start(p guestProc, capture bool) (int, error) {
+	req := map[string]any{"path": p.Path, "arg": p.Args, "capture-output": capture}
+	if p.Env != nil {
+		req["env"] = p.Env
 	}
-	var s strings.Builder
-	s.WriteString("Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n")
-	s.WriteString("$ProgressPreference='SilentlyContinue'\n[Console]::OutputEncoding=[Text.Encoding]::UTF8\n")
-	for _, kv := range o.Env {
-		k, v, _ := strings.Cut(kv, "=")
-		fmt.Fprintf(&s, "Set-Item -LiteralPath %s -Value %s\n", psQuote("env:"+k), psQuote(v))
+	if p.Input != nil {
+		req["input-data"] = base64.StdEncoding.EncodeToString(p.Input)
 	}
-	fmt.Fprintf(&s, "Set-Location -LiteralPath %s\n$global:LASTEXITCODE=$null\n", psQuote(cwd))
-	if o.Line != "" {
-		s.WriteString(o.Line + "\n")
-	} else {
-		s.WriteString("&")
-		for _, a := range o.Argv {
-			s.WriteString(" " + psQuote(a))
+	var started struct {
+		PID int `json:"pid"`
+	}
+	err := a.call("guest-exec", req, &started, 60*time.Second)
+	return started.PID, err
+}
+
+// wait polls pid until it exits. It returns nil if deadline (unless zero)
+// passes first.
+func (a *agentConn) wait(pid int, deadline time.Time) (*execStatus, error) {
+	delay := 2 * time.Millisecond
+	for {
+		var st execStatus
+		if err := a.call("guest-exec-status", map[string]any{"pid": pid}, &st, 120*time.Second); err != nil {
+			return nil, err
 		}
-		s.WriteString("\n")
+		if st.Exited {
+			return &st, nil
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return nil, nil
+		}
+		time.Sleep(delay)
+		delay = min(delay*3/2, 200*time.Millisecond)
 	}
-	s.WriteString("if ($?) { exit 0 }\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\nexit 1\n")
-	return s.String()
+}
+
+// run starts p and waits up to limit for it, ignoring how it went.
+func (a *agentConn) run(p guestProc, limit time.Duration) {
+	if pid, err := a.start(p, false); err == nil {
+		a.wait(pid, time.Now().Add(limit))
+	}
 }
 
 func guestExec(m *Meta, o ExecOpts) (*ExecResult, error) {
@@ -98,88 +95,33 @@ func guestExec(m *Meta, o ExecOpts) (*ExecResult, error) {
 	// session hands the agent back (see agentHold).
 	a := guestSession(m.ID)
 	defer a.close()
-	path, args, env := guestCommand(m, o)
-	if m.OS == "windows" {
-		// -EncodedCommand would turn stderr into CLIXML, so run a script file
-		// (it deletes itself first thing). UTF-8 with BOM so non-ASCII survives.
-		script := fmt.Sprintf(`C:\Windows\Temp\veems-%d.ps1`, time.Now().UnixNano())
-		if err := writeFile(a, script, strings.NewReader("\ufeff"+psScript(m, o))); err != nil {
-			return nil, err
-		}
-		args = []string{"-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script}
+	p, err := m.guest().proc(a, o)
+	if err != nil {
+		return nil, err
 	}
-	req := map[string]any{"path": path, "arg": args, "capture-output": true}
-	if env != nil {
-		req["env"] = env
-	}
-	if o.Stdin != nil {
-		req["input-data"] = base64.StdEncoding.EncodeToString(o.Stdin)
-	}
-	var started struct {
-		PID int `json:"pid"`
-	}
-	if err := a.call("guest-exec", req, &started, 60*time.Second); err != nil {
+	p.Input = o.Stdin
+	pid, err := a.start(p, true)
+	if err != nil {
 		return nil, err
 	}
 	var deadline time.Time
 	if o.Timeout > 0 {
 		deadline = time.Now().Add(o.Timeout)
 	}
-	delay := time.Millisecond
-	for {
-		var st execStatus
-		if err := a.call("guest-exec-status", map[string]any{"pid": started.PID}, &st, 120*time.Second); err != nil {
-			return nil, err
-		}
-		if st.Exited {
-			r := &ExecResult{Truncated: st.OutTruncated || st.ErrTruncated}
-			r.Stdout, _ = base64.StdEncoding.DecodeString(st.OutData)
-			r.Stderr, _ = base64.StdEncoding.DecodeString(st.ErrData)
-			switch {
-			case st.ExitCode != nil:
-				r.ExitCode = *st.ExitCode
-			case st.Signal != nil:
-				r.ExitCode = 128 + *st.Signal
-			}
-			return r, nil
-		}
-		if !deadline.IsZero() && time.Now().After(deadline) {
-			a.close()
-			killGuestTree(m, started.PID)
-			return &ExecResult{ExitCode: 124, TimedOut: true}, nil
-		}
-		time.Sleep(delay)
-		if delay < 200*time.Millisecond {
-			delay = delay * 3 / 2
-			if delay < 2*time.Millisecond {
-				delay = 2 * time.Millisecond
-			}
-		}
+	st, err := a.wait(pid, deadline)
+	if err != nil {
+		return nil, err
 	}
+	if st == nil {
+		killGuestTree(a, m, pid)
+		return &ExecResult{ExitCode: 124, TimedOut: true}, nil
+	}
+	return st.result(), nil
 }
 
-func killGuestTree(m *Meta, pid int) {
-	var path string
-	var args []string
-	if m.OS == "windows" {
-		path, args = "taskkill.exe", []string{"/F", "/T", "/PID", fmt.Sprint(pid)}
-	} else {
-		path, args = "/bin/sh", []string{"-c", `kt(){ for c in $(pgrep -P "$1"); do kt "$c"; done; kill -9 "$1"; }; kt "$1"`, "veems", fmt.Sprint(pid)}
-	}
-	var started struct {
-		PID int `json:"pid"`
-	}
-	if guestCall(m.ID, "guest-exec", map[string]any{"path": path, "arg": args}, &started, 10*time.Second) == nil {
-		var st execStatus
-		for i := 0; i < 50; i++ {
-			if guestCall(m.ID, "guest-exec-status", map[string]any{"pid": started.PID}, &st, 10*time.Second) != nil || st.Exited {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-	var st execStatus
-	guestCall(m.ID, "guest-exec-status", map[string]any{"pid": pid}, &st, 10*time.Second) // reap
+func killGuestTree(a *agentConn, m *Meta, pid int) {
+	a.run(m.guest().killTree(pid), 3*time.Second)
+	a.call("guest-exec-status", map[string]any{"pid": pid}, &execStatus{}, 10*time.Second) // reaps it
 }
 
 // mustExec runs a helper command in the guest and fails on a nonzero exit.

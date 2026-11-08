@@ -1,73 +1,14 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
 )
-
-// qmpConn is a QEMU monitor connection kept open for a burst of input events.
-type qmpConn struct {
-	c   net.Conn
-	dec *json.Decoder
-}
-
-func dialQMP(dir string) (*qmpConn, error) {
-	c, err := net.DialTimeout("unix", filepath.Join(dir, "qmp.sock"), 3*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("vm monitor unreachable: %w", err)
-	}
-	q := &qmpConn{c: c, dec: json.NewDecoder(c)}
-	c.SetDeadline(time.Now().Add(10 * time.Second))
-	var greet map[string]any
-	if err := q.dec.Decode(&greet); err != nil {
-		c.Close()
-		return nil, err
-	}
-	if _, err := q.do("qmp_capabilities", nil); err != nil {
-		c.Close()
-		return nil, err
-	}
-	return q, nil
-}
-
-func (q *qmpConn) do(cmd string, args any) (json.RawMessage, error) {
-	q.c.SetDeadline(time.Now().Add(30 * time.Second))
-	m := map[string]any{"execute": cmd}
-	if args != nil {
-		m["arguments"] = args
-	}
-	b, _ := json.Marshal(m)
-	if _, err := q.c.Write(b); err != nil {
-		return nil, err
-	}
-	for {
-		var r struct {
-			reply
-			Event string `json:"event"`
-		}
-		if err := q.dec.Decode(&r); err != nil {
-			return nil, err
-		}
-		if r.Event != "" {
-			continue
-		}
-		if r.Error != nil {
-			return nil, r.Error
-		}
-		return r.Return, nil
-	}
-}
-
-func (q *qmpConn) Close() { q.c.Close() }
 
 // screenshot saves the VM's screen as PNG and returns its width and height.
 func screenshot(id string) (png []byte, w, h int, err error) {
@@ -85,11 +26,6 @@ func screenshot(id string) (png []byte, w, h int, err error) {
 		return nil, 0, 0, fmt.Errorf("bad screenshot")
 	}
 	return png, int(binary.BigEndian.Uint32(png[16:20])), int(binary.BigEndian.Uint32(png[20:24])), nil
-}
-
-func screenSize(id string) (int, int, error) {
-	_, w, h, err := screenshot(id)
-	return w, h, err
 }
 
 // Pointer events use absolute coordinates scaled to 0..32767.
@@ -117,7 +53,7 @@ func keyEvent(qcode string, down bool) map[string]any {
 }
 
 func (q *qmpConn) send(events []map[string]any) error {
-	_, err := q.do("input-send-event", map[string]any{"events": events})
+	_, err := q.do("input-send-event", map[string]any{"events": events}, 30*time.Second)
 	return err
 }
 
@@ -128,14 +64,14 @@ type pointer struct {
 }
 
 func newPointer(m *Meta) (*pointer, error) {
-	if !m.Desktop {
-		return nil, fmt.Errorf("%s has no desktop; start one with `veems new %s --desktop`", m.ID, m.OS)
+	if err := needDesktop(m); err != nil {
+		return nil, err
 	}
-	w, h, err := screenSize(m.ID)
+	_, w, h, err := screenshot(m.ID)
 	if err != nil {
 		return nil, err
 	}
-	q, err := dialQMP(vmDir(m.ID))
+	q, err := dialQMP(vmDir(m.ID), 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -241,7 +177,7 @@ func typeText(m *Meta, text string) error {
 			return fmt.Errorf("cannot type %q with the virtual keyboard (US layout, ASCII only); put the text on the clipboard or in a file with `veems exec` instead", r)
 		}
 	}
-	q, err := dialQMP(vmDir(m.ID))
+	q, err := dialQMP(vmDir(m.ID), 10*time.Second)
 	if err != nil {
 		return err
 	}
@@ -269,7 +205,7 @@ func typeText(m *Meta, text string) error {
 
 // pressKeys presses combos like "ctrl+l", "alt+f4", "enter" in order.
 func pressKeys(m *Meta, combos []string) error {
-	q, err := dialQMP(vmDir(m.ID))
+	q, err := dialQMP(vmDir(m.ID), 10*time.Second)
 	if err != nil {
 		return err
 	}
@@ -311,45 +247,20 @@ func pressKeys(m *Meta, combos []string) error {
 	return nil
 }
 
-// launchGUI starts a program on the VM's desktop and returns immediately.
+// launchGUI starts a program on the VM's desktop and returns at once.
 func launchGUI(m *Meta, o ExecOpts) error {
+	if err := needDesktop(m); err != nil {
+		return err
+	}
+	_, err := mustExec(m, m.guest().gui(o))
+	return err
+}
+
+func needDesktop(m *Meta) error {
 	if !m.Desktop {
 		return fmt.Errorf("%s has no desktop; start one with `veems new %s --desktop`", m.ID, m.OS)
 	}
-	p := metaProfile(m)
-	cwd := o.Cwd
-	if cwd == "" {
-		cwd = p.WorkDir
-	}
-	if m.OS == "windows" {
-		// Programs started by the guest agent live in the invisible service
-		// session; a scheduled task puts them in Administrator's desktop.
-		inner := psScript(m, ExecOpts{Line: o.Line, Argv: o.Argv, Cwd: cwd, Env: o.Env})
-		inner = strings.Replace(inner, "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n", "", 1)
-		u := utf16.Encode([]rune(inner))
-		b := make([]byte, len(u)*2)
-		for i, c := range u {
-			b[2*i], b[2*i+1] = byte(c), byte(c>>8)
-		}
-		enc := base64.StdEncoding.EncodeToString(b)
-		_, err := mustExec(m, ExecOpts{Cwd: `C:\`, Line: `$n = 'veems-gui-' + [guid]::NewGuid()
-$a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ` + enc + `'
-$p = New-ScheduledTaskPrincipal -UserId 'Administrator' -LogonType Interactive -RunLevel Highest
-Register-ScheduledTask -TaskName $n -Action $a -Principal $p -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -AllowStartIfOnBatteries) | Out-Null
-Start-ScheduledTask -TaskName $n`})
-		return err
-	}
-	cmd := o.Argv
-	if o.Line != "" {
-		cmd = []string{"/bin/bash", "-lc", o.Line}
-	}
-	args := append([]string{"-c", `cd -- "$1" || exit 125; shift
-u=$(id -u agent)
-setsid -f runuser -u agent -- env DISPLAY=:0 XAUTHORITY=/home/agent/.Xauthority HOME=/home/agent USER=agent \
-  DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$u/bus XDG_RUNTIME_DIR=/run/user/$u "$@" >/dev/null 2>&1 </dev/null`,
-		"veems", cwd}, cmd...)
-	_, err := mustExec(m, ExecOpts{Cwd: "/", Argv: append([]string{"/bin/sh"}, args...), Env: o.Env})
-	return err
+	return nil
 }
 
 func atoiArgs(ss []string) ([]int, error) {

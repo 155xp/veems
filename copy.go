@@ -3,84 +3,14 @@ package main
 import (
 	"archive/tar"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
 )
-
-const chunk = 4 << 20
-
-// The Windows guest agent stalls for good when one reply is much over 512 KB,
-// so reads from Windows go in smaller pieces.
-func readChunk(m *Meta) int {
-	if m.OS == "windows" {
-		return 256 << 10
-	}
-	return chunk
-}
-
-// guestPath makes a guest path absolute, relative paths starting at the work dir.
-func guestPath(m *Meta, p string) string {
-	prof := metaProfile(m)
-	if m.OS == "windows" {
-		p = strings.ReplaceAll(p, "/", `\`)
-		if p == "" || p == "." {
-			return prof.WorkDir
-		}
-		if len(p) >= 2 && p[1] == ':' || strings.HasPrefix(p, `\\`) {
-			return p
-		}
-		return prof.WorkDir + `\` + p
-	}
-	if p == "" || p == "." {
-		return prof.WorkDir
-	}
-	if strings.HasPrefix(p, "/") {
-		return p
-	}
-	return path.Join(prof.WorkDir, p)
-}
-
-func guestBase(m *Meta, p string) string {
-	if m.OS == "windows" {
-		p = strings.TrimRight(p, `\`)
-		return p[strings.LastIndexAny(p, `\:`)+1:]
-	}
-	return path.Base(p)
-}
-
-func guestJoin(m *Meta, dir, name string) string {
-	if m.OS == "windows" {
-		return strings.TrimRight(dir, `\`) + `\` + name
-	}
-	return path.Join(dir, name)
-}
-
-func guestTemp(m *Meta) string {
-	if m.OS == "windows" {
-		return fmt.Sprintf(`C:\Windows\Temp\veems-%d.tar`, time.Now().UnixNano())
-	}
-	return fmt.Sprintf("/tmp/veems-%d.tar", time.Now().UnixNano())
-}
-
-// prepTarget makes a file's parent directory and says whether dst is a directory.
-func prepTarget(m *Meta, dst string) (isDir bool, err error) {
-	var out string
-	if m.OS == "windows" {
-		out, err = mustExec(m, ExecOpts{Cwd: `C:\`, Line: fmt.Sprintf(
-			`$p=%s; if (Test-Path -LiteralPath $p -PathType Container) { 'dir' } else { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p) | Out-Null; 'file' }`, psQuote(dst))})
-	} else {
-		out, err = mustExec(m, ExecOpts{Cwd: "/", Argv: []string{"/bin/sh", "-c",
-			`if [ -d "$1" ]; then echo dir; else mkdir -p -- "$(dirname -- "$1")" && echo file; fi`, "veems", dst}})
-	}
-	return strings.TrimSpace(out) == "dir", err
-}
 
 func openGuest(a *agentConn, p, mode string) (int, error) {
 	var h int
@@ -92,7 +22,6 @@ func closeGuest(a *agentConn, h int) {
 	a.call("guest-file-close", map[string]any{"handle": h}, nil, 30*time.Second)
 }
 
-// writeGuest streams r into a new guest file.
 func writeGuest(m *Meta, dst string, r io.Reader) error {
 	a := guestSession(m.ID)
 	defer a.close()
@@ -105,7 +34,7 @@ func writeFile(a *agentConn, dst string, r io.Reader) error {
 		return err
 	}
 	defer closeGuest(a, h)
-	buf := make([]byte, chunk)
+	buf := make([]byte, 4<<20)
 	for {
 		n, rerr := io.ReadFull(r, buf)
 		if n > 0 {
@@ -129,28 +58,19 @@ type fileRead struct {
 	EOF   bool   `json:"eof"`
 }
 
-// readGuest streams a guest file into w. On an error before any byte is
-// written (a directory, say) it returns errNotFile.
-var errNotFile = errors.New("not a regular file")
-
 func readGuest(m *Meta, src string, w io.Writer) error {
 	a := guestSession(m.ID)
 	defer a.close()
 	h, err := openGuest(a, src, "rb")
 	if err != nil {
-		return fmt.Errorf("%w: %v", errNotFile, err)
+		return err
 	}
 	defer closeGuest(a, h)
-	first := true
 	for {
 		var fr fileRead
-		if err := a.call("guest-file-read", map[string]any{"handle": h, "count": readChunk(m)}, &fr, 120*time.Second); err != nil {
-			if first {
-				return fmt.Errorf("%w: %v", errNotFile, err)
-			}
+		if err := a.call("guest-file-read", map[string]any{"handle": h, "count": m.guest().readChunk()}, &fr, 120*time.Second); err != nil {
 			return err
 		}
-		first = false
 		b, err := base64.StdEncoding.DecodeString(fr.Buf)
 		if err != nil {
 			return err
@@ -164,54 +84,40 @@ func readGuest(m *Meta, src string, w io.Writer) error {
 	}
 }
 
-func removeGuest(m *Meta, p string) {
-	if m.OS == "windows" {
-		guestExec(m, ExecOpts{Cwd: `C:\`, Line: "Remove-Item -Force -LiteralPath " + psQuote(p)})
-	} else {
-		guestExec(m, ExecOpts{Cwd: "/", Argv: []string{"rm", "-f", "--", p}})
-	}
-}
-
-// Push copies a host file or directory into the guest. dst is the final path;
+// push copies a host file or directory into the guest. dst is the final path;
 // if it is an existing guest directory (or ends in a separator) a file lands inside it.
 func push(m *Meta, src, dst string) error {
+	g := m.guest()
 	st, err := os.Stat(src)
 	if err != nil {
 		return err
 	}
 	trailing := strings.HasSuffix(dst, "/") || strings.HasSuffix(dst, `\`) || dst == ""
-	dst = guestPath(m, dst)
+	dst = g.abs(dst)
 	if !st.IsDir() {
 		f, err := os.Open(src)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
-		isDir, err := prepTarget(m, dst)
+		out, err := mustExec(m, g.prepTarget(dst))
 		if err != nil {
 			return err
 		}
-		if isDir || trailing {
-			dst = guestJoin(m, dst, filepath.Base(src))
+		if strings.TrimSpace(out) == "dir" || trailing {
+			dst = g.join(dst, filepath.Base(src))
 		}
 		return writeGuest(m, dst, f)
 	}
-	// Directory: tar on the host, stream it over, unpack with the guest's tar.
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(writeTar(pw, src)) }()
-	tmp := guestTemp(m)
+	tmp := g.temp(".tar")
 	if err := writeGuest(m, tmp, pr); err != nil {
 		pr.CloseWithError(err)
 		return err
 	}
-	defer removeGuest(m, tmp)
-	if m.OS == "windows" {
-		_, err = mustExec(m, ExecOpts{Cwd: `C:\`, Line: fmt.Sprintf(
-			`New-Item -ItemType Directory -Force -Path %s | Out-Null; tar.exe -xf %s -C %s`, psQuote(dst), psQuote(tmp), psQuote(dst))})
-	} else {
-		_, err = mustExec(m, ExecOpts{Cwd: "/", Argv: []string{"/bin/sh", "-c",
-			`mkdir -p -- "$2" && tar --no-same-owner -xf "$1" -C "$2"`, "veems", tmp, dst}})
-	}
+	defer guestExec(m, g.remove(tmp))
+	_, err = mustExec(m, g.unpack(tmp, dst))
 	return err
 }
 
@@ -261,42 +167,24 @@ func writeTar(w io.Writer, root string) error {
 	return tw.Close()
 }
 
-// Pull copies a guest file or directory to the host.
+// pull copies a guest file or directory to the host.
 func pull(m *Meta, src, dst string) error {
-	src = guestPath(m, src)
+	g := m.guest()
+	src = g.abs(src)
 	if st, err := os.Stat(dst); err == nil && st.IsDir() {
-		dst = filepath.Join(dst, guestBase(m, src))
+		dst = filepath.Join(dst, g.base(src))
 	}
-	gtmp := guestTemp(m)
-	var err error
-	if m.OS == "windows" {
-		// The Windows agent opens a directory but then blocks reading it, so
-		// look first: a directory is tarred in the same step.
-		var out string
-		out, err = mustExec(m, ExecOpts{Cwd: `C:\`, Line: fmt.Sprintf(
-			`$p=%[1]s; if (Test-Path -LiteralPath $p -PathType Container) { tar.exe -cf %[2]s -C $p .; if ($LASTEXITCODE) { exit $LASTEXITCODE }; 'dir' } elseif (Test-Path -LiteralPath $p) { 'file' } else { [Console]::Error.WriteLine("no such file or directory: $p"); exit 2 }`,
-			psQuote(src), psQuote(gtmp))})
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(out) == "file" {
-			return pullFile(m, src, dst)
-		}
-	} else {
-		err = pullFile(m, src, dst)
-		if !errors.Is(err, errNotFile) {
-			return err
-		}
-		// Probably a directory: tar it up in the guest and unpack safely here.
-		_, err = mustExec(m, ExecOpts{Cwd: "/", Argv: []string{"/bin/sh", "-c",
-			`[ -d "$1" ] || { echo "no such file or directory: $1" >&2; exit 2; }; tar -cf "$2" -C "$1" .`, "veems", src, gtmp}})
-		if err != nil {
-			return err
-		}
+	tar := g.temp(".tar")
+	out, err := mustExec(m, g.packIfDir(src, tar))
+	if err != nil {
+		return err
 	}
-	defer removeGuest(m, gtmp)
+	if strings.TrimSpace(out) == "file" {
+		return pullFile(m, src, dst)
+	}
+	defer guestExec(m, g.remove(tar))
 	pr, pw := io.Pipe()
-	go func() { pw.CloseWithError(readGuest(m, gtmp, pw)) }()
+	go func() { pw.CloseWithError(readGuest(m, tar, pw)) }()
 	err = safeUntar(pr, dst)
 	pr.CloseWithError(err)
 	return err

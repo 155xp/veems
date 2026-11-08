@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 // browser key codes (KeyboardEvent.code) to QEMU qcodes
@@ -83,7 +84,7 @@ func view(m *Meta, port int, open bool) error {
 		defer mu.Unlock()
 		if q == nil {
 			var err error
-			if q, err = dialQMP(vmDir(m.ID)); err != nil {
+			if q, err = dialQMP(vmDir(m.ID), 10*time.Second); err != nil {
 				return err
 			}
 		}

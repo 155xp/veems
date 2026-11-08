@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -31,10 +30,6 @@ type BuildOpts struct {
 	Snapshot bool   // only recapture the snapshot
 	ISO      string // windows: use this ISO instead of downloading the evaluation
 	Desktop  bool   // windows: Desktop Experience instead of Server Core
-}
-
-func logf(format string, a ...any) {
-	fmt.Fprintf(os.Stderr, "veems: "+format+"\n", a...)
 }
 
 func download(url, name string) (string, error) {
@@ -96,7 +91,7 @@ func runToPoweroff(s Spec, limit time.Duration) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	defer killOnSignal(s.Dir)()
+	defer onInterrupt(func() { killVMProcs(s.Dir) })()
 	defer killVMProcs(s.Dir)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -131,14 +126,11 @@ func build(o BuildOpts) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(filepath.Join(dir, "build.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, err := lockFile(filepath.Join(dir, "build.lock"), false)
 	if err != nil {
-		return err
-	}
-	defer lock.Close()
-	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 		return fmt.Errorf("another `veems build %s` is running", p.Key)
 	}
+	defer lock.Close()
 	if !o.Snapshot || !exists(basePath(p.Key)) {
 		start := time.Now()
 		switch p.OS {
@@ -293,11 +285,11 @@ func captureSnapshot(p *Profile) error {
 	}
 	done := make(chan struct{})
 	go func() { cmd.Wait(); close(done) }()
-	defer killOnSignal(work)()
+	defer onInterrupt(func() { killVMProcs(work) })()
 	defer func() { killVMProcs(work); cmd.Process.Kill(); <-done }()
 
 	logf("booting %s to snapshot it", p.Key)
-	deadline := time.Now().Add(time.Duration(p.Boot) * time.Second)
+	deadline := time.Now().Add(p.Boot)
 	for agentCall(work, "guest-ping", nil, nil, 2*time.Second) != nil {
 		select {
 		case <-done:
@@ -310,42 +302,14 @@ func captureSnapshot(p *Profile) error {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	settle := 5 * time.Second
-	switch {
-	case p.OS == "windows":
-		settle = 3 * time.Minute // let first-boot work (.NET, services) finish so clones start idle
-	case p.Desktop:
-		settle = 40 * time.Second // the desktop session logs in and settles
-	}
-	logf("guest up after %s; letting it settle for %s", time.Since(start).Round(time.Second), settle)
-	time.Sleep(settle)
-	// Run the shell once so its files are already in the page cache of every clone.
-	warm := map[string]any{"path": "/bin/bash", "arg": []string{"-c", "true"}}
-	if p.OS == "windows" {
-		warm = map[string]any{"path": "powershell.exe", "arg": []string{"-NoProfile", "-Command", "Get-Date | Out-Null; Get-ChildItem C:\\ | Out-Null"}}
-	}
-	for i := 0; i < 2; i++ {
-		var r struct{ PID int }
-		if agentCall(work, "guest-exec", warm, &r, 10*time.Second) == nil {
-			for j := 0; j < 300; j++ {
-				var st struct{ Exited bool }
-				if agentCall(work, "guest-exec-status", map[string]any{"pid": r.PID}, &st, 10*time.Second) != nil || st.Exited {
-					break
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}
-	}
-	if p.OS == "linux" {
-		var r struct{ PID int }
-		agentCall(work, "guest-exec", map[string]any{"path": "/bin/sh", "arg": []string{"-c", "sync; echo 3 > /proc/sys/vm/drop_caches"}}, &r, 10*time.Second)
-		time.Sleep(500 * time.Millisecond)
-	}
+	logf("guest up after %s; letting it settle for %s", time.Since(start).Round(time.Second), p.Settle)
+	time.Sleep(p.Settle)
+	a := &agentConn{dir: work}
+	defer a.close()
+	p.guest().beforeSnapshot(a)
 
 	// Save with the agent connected, as it is after every restore (see
 	// agentProxy), so clones answer at once.
-	a := &agentConn{dir: work}
-	defer a.close()
 	if err := a.call("guest-ping", nil, nil, 10*time.Second); err != nil {
 		return fmt.Errorf("guest agent: %w", err)
 	}
